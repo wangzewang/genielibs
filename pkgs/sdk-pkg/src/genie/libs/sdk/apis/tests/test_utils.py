@@ -10,7 +10,7 @@ from genie.libs.clean.stages.tests.utils import create_test_device
 from genie.libs.sdk.apis.utils import (
     modify_filename, copy_from_device, copy_to_device, device_recovery_boot,
     configure_management_console, configure_peripheral_terminal_server,
-    time_to_int)
+    time_to_int, slugify_filename)
 
 
 class TestUtilsApi(unittest.TestCase):
@@ -58,12 +58,14 @@ class TestUtilsApi(unittest.TestCase):
         device.hostname = 'router'
         device.os = 'iosxe'
         device.via = 'cli'
+        device.connections['cli'] = Mock()
         device.connections['cli'].get = Mock(return_value='js')
         device.testbed.devices = {}
         device.testbed.devices['js'] = MagicMock()
         device.testbed.devices['js'].api.socat_relay = Mock(return_value=2000)
         device.testbed.devices['js'].api.get_local_ip = Mock(return_value='127.0.0.1')
         device.testbed.devices['js'].execute = Mock(return_value='inet 127.0.0.2')
+        device.testbed.devices['js'].api.get_route_iface_source_ip = Mock(return_value=(None, '127.0.0.2'))
         device.api.get_mgmt_ip_and_mgmt_src_ip_addresses = Mock(return_value=('127.0.0.1', ['127.0.0.2']))
         device.api.get_local_ip = Mock(return_value='127.0.0.1')
         device.api.convert_server_to_linux_device = Mock(return_value=None)
@@ -86,6 +88,7 @@ class TestUtilsApi(unittest.TestCase):
         server.api.socat_relay = Mock(return_value=2000)
         server.api.get_local_ip = Mock(return_value='127.0.0.1')
         server.execute = Mock(return_value='inet 127.0.0.2')
+        server.api.get_route_iface_source_ip = Mock(return_value=(None, '127.0.0.2'))
         device.testbed.servers = {}
         device.testbed.servers['proxy'] = {}
         device.api.convert_server_to_linux_device = Mock(return_value=server)
@@ -111,12 +114,13 @@ class TestUtilsApi(unittest.TestCase):
         device.os = 'iosxe'
         device.via = 'cli'
         device_1 = MagicMock()
+        device.connections['cli'] = Mock()
         device.connections['cli'].get = Mock(return_value='js')
         device.testbed.devices = {'js':device_1}
         device_1.api.socat_relay = Mock(return_value=2000)
         device_1.api.get_local_ip  = Mock(return_value='127.0.0.1')
         device_1.execute = Mock(return_value='inet 127.0.0.2')
-        device.api.get_mgmt_ip_and_mgmt_src_ip_addresses = Mock(return_value=('127.0.0.1', ['127.0.0.2']))
+        device_1.api.get_route_iface_source_ip = Mock(return_value=(None, '127.0.0.2'))
         device.api.get_local_ip = Mock(return_value='127.0.0.1')
         device.api.convert_server_to_linux_device = Mock(return_value=None)
         device.execute = Mock()
@@ -134,7 +138,7 @@ class TestUtilsApi(unittest.TestCase):
         device_1.api.socat_relay = Mock(return_value=2000)
         device_1.api.get_local_ip  = Mock(return_value='127.0.0.1')
         device_1.execute = Mock(return_value='inet 127.0.0.2')
-        device.api.get_mgmt_ip_and_mgmt_src_ip_addresses = Mock(return_value=('127.0.0.1', ['127.0.0.2']))
+        device_1.api.get_route_iface_source_ip = Mock(return_value=(None, '127.0.0.2'))
         device.api.get_local_ip = Mock(return_value='127.0.0.1')
         device.api.convert_server_to_linux_device = Mock(return_value=None)
         device.execute = Mock()
@@ -156,6 +160,7 @@ class TestUtilsApi(unittest.TestCase):
         server.api.socat_relay = Mock(return_value=2000)
         server.api.get_local_ip = Mock(return_value='127.0.0.1')
         server.execute = Mock(return_value='inet 127.0.0.2')
+        server.api.get_route_iface_source_ip = Mock(return_value=(None, '127.0.0.2'))
         device.testbed.servers = Mock(return_value=server)
         device.testbed.servers = {}
         device.testbed.servers['proxy'] = {}
@@ -283,10 +288,10 @@ class TestUtilsApi(unittest.TestCase):
 
         terminal_device.configure.assert_not_called()
 
-def test_time_to_int(self):
+    def test_time_to_int(self):
         time = '10:58'
         result = time_to_int(time)
-        self.assertEqual(result, 658)
+        self.assertEqual(result, 39480)
 
         time = '10:20:30'
         result = time_to_int(time)
@@ -295,3 +300,13 @@ def test_time_to_int(self):
         time = '6d14h'
         result = time_to_int(time)
         self.assertEqual(result, 568800)
+
+class TestSlugifyFilename(unittest.TestCase):
+
+    def test_slugify_filename_double_suffix_hostname_present(self):
+        device = MagicMock()
+        device.hostname = "Lime1_GX"
+
+        path = "bootflash:/ctc_Lime1_GX_2025_09_19_active.tar.gz"
+        result = slugify_filename(device, path)
+        self.assertEqual(result, "ctc_Lime1_GX_2025_09_19_active.tar.gz")

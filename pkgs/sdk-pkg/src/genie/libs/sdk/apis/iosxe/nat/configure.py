@@ -470,7 +470,7 @@ def configure_standard_access_list(
     acl_number,
     permission,
     source_ip,
-    wild_mask    
+     wild_mask= None    
 ):
     """ Configure standard access-list
         Args:
@@ -478,14 +478,17 @@ def configure_standard_access_list(
             acl_number ('str'): Acl number
             permission ('str'): (permit | deny)
             source_ip ('str'): Source ip
-            wild_mask ('str'): Wild mask
+             wild_mask ('str',optional): Wild mask
         Returns:
             None
         Raises:
             SubCommandFailure: standard access-list not configured
     """
-    cmd = ["access-list {} {} {} {}".format(
+    if wild_mask:
+        cmd = ["access-list {} {} {} {}".format(
               acl_number,permission,source_ip,wild_mask)]
+    else:
+        cmd = ["access-list {} {} {}".format(acl_number,permission,source_ip)]
 
     try:
         device.configure(cmd)
@@ -498,7 +501,7 @@ def unconfigure_standard_access_list(
     acl_number,
     permission,
     source_ip,
-    wild_mask    
+    wild_mask= None     
 ):
     """ UnConfigure standard access-list
         Args:
@@ -506,15 +509,17 @@ def unconfigure_standard_access_list(
             acl_number ('str'): Acl number
             permission ('str'): (permit | deny)
             source_ip ('str'): Source ip
-            wild_mask ('str'): Wild mask
+            wild_mask ('str',optional): Wild mask
         Returns:
             None
         Raises:
             SubCommandFailure: standard access-list not unconfigured
     """
-    cmd = ["no access-list {} {} {} {}".format(
+    if wild_mask:
+        cmd = ["no access-list {} {} {} {}".format(
               acl_number,permission,source_ip,wild_mask)]
-
+    else:
+        cmd = ["no access-list {} {} {}".format(acl_number,permission,source_ip)]
     try:
         device.configure(cmd)
     except SubCommandFailure as e:
@@ -2187,3 +2192,41 @@ def configure_nat_setting_gatekeeper_size(device, size, enable=True):
             "Could not configure nat gatekeeper size on "
             "device. Error:\n{e}".format(e=e)
         )
+
+def configure_ip_nat_switchover_http(device):
+    """ Configure ip nat switchover http
+        Args:
+            device ('obj'): device to use
+        Returns:
+            console output
+        Raises:
+            SubCommandFailure: IP Nat switchover http not configured
+    """
+    cmd = f'ip nat switchover replication http'
+    out = None
+    try:
+        out = device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            "Could not Configure  IP Nat switchover http. Error:\n{error}".format(error=e)
+        )
+    return out
+
+def unconfigure_ip_nat_switchover_http(device):
+    """ Configure ip nat switchover http
+        Args:
+            device ('obj'): device to use
+        Returns:
+            console output
+        Raises:
+            SubCommandFailure: IP Nat switchover http not unconfigured
+    """
+    cmd = f'no ip nat switchover replication http'
+    out = None
+    try:
+        out = device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            "Could not UnConfigure  IP Nat switchover http. Error:\n{error}".format(error=e)
+        )
+    return out

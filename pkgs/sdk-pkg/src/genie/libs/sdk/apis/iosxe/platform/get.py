@@ -777,30 +777,56 @@ def get_platform_model_number(device):
     Args:
         device (obj): Device object
 
-    Return:
+    Returns:
         str: Device model number or chassis type
     """
-
     try:
-        out_inventory = device.parse('show inventory').q.contains('chassis').get_values('pid', 0)
-        output_detail=out_inventory
+        inventory_parsed = device.parse('show inventory')
     except SubCommandFailure:
-        log.info('Could not get device chassis type from inventory information')
+        log.info('Could not parse "show inventory" on device')
         return None
 
-    try:
-        out_version = device.parse('show version').q.contains('version').get_values('chassis', 0)
-    except SubCommandFailure:
-        log.info('Could not get device chassis type from version information')
-        return None
+    # Collect chassis PID from inventory
+    chassis_pids = inventory_parsed.q.contains('chassis').get_values('pid')
 
-    if out_inventory == out_version:
-        return output_detail
+    # Collect fallback PIDs if chassis missing
+    pids_to_check = []
+    if not chassis_pids:
+        slots = inventory_parsed.get('slot', {})
+        for slot_data in slots.values():
+            other_items = slot_data.get('other', {})
+            for item in other_items.values():
+                pid = item.get('pid')
+                if pid:
+                    pids_to_check.append(pid)
     else:
+        pids_to_check = chassis_pids  # initially just the chassis PID
+
+    if not pids_to_check:
+        log.info('No PIDs found in inventory')
+        return None
+
+    # Get chassis PID from show version
+    try:
+        version_chassis = device.parse('show version').q.contains('version').get_values('chassis')
+    except SubCommandFailure:
+        version_chassis = None
+
+    # Compare inventory PID(s) with version chassis PID
+    if version_chassis:
+        for pid in pids_to_check:
+            if pid in version_chassis:
+                return pid
         log.info(
-            'Could not get device "platform model number", mismatch in chassis type in "inventory" and "version" information'
+            'No matching PID found between inventory (%s) and version chassis (%s)',
+            pids_to_check, version_chassis
         )
         return None
+    else:
+        # show version failed, cannot verify, log fallback
+        log.info('No version chassis info available. Inventory PIDs found: %s', pids_to_check)
+        return None
+
 
 def get_number_of_interfaces(device):
     """ Gets the device number of interfaces
@@ -1327,32 +1353,40 @@ def show_tech_support_platform_monitor(device, file_name, session_id):
     except SubCommandFailure as e:
         log.error(f"Failed to redirect the output to bootflash: {e}")
 
-def get_logging_message_time(device, message):
-    """ Get message time from log message using regex
-        Args:
-            device ('obj'): device to run on
-            message ('str'): Line from show logging command
-            regex ('str'): Regex to extract time from line
-        Returns:
-            datetime: Time extracted from message or None if parsing fails
-    """    
-    # Apr  8 04:18:45.753
-    p0 = re.compile(r"(\*?)\s*(?P<month>\S+)\s+(?P<day>\d{1,2})\s+(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})\.(?P<millisecond>\d{3})")
 
-    # Apr  8 04:18:45.753
-    m = p0.match(message)
-    if m:
-        group = m.groupdict()
-        hour = int(group["hour"])
-        minute = int(group["minute"])
-        second = int(group["second"])
-        milliseconds = int(group["millisecond"])
-        month = datetime.strptime(group["month"], "%b").month
-        day = int(group["day"])
-        year = int(group.get("year", datetime.now().year))
+def get_environment_alarm_contact(device, contact_number):
+    """
+    Get the contact information for a specific alarm contact.
 
-        return datetime(year, month, day, hour, minute, second, milliseconds)
-    else:
-        log.info(f"Regex did not match message: {message}")
+    Args:
+        device (`obj`): Device object
+        contact_number (`int`): Alarm contact number
 
-    return None
+    Returns:
+        dict: A dictionary containing the contact information
+
+    Raises:
+        Exception: If the command output is empty or the contact number is not found.      
+    """
+    log.info(f"Getting environment alarm contact {contact_number} on device {device.name}")
+    try:
+        output = device.parse("show environment alarm-contact")
+    
+        alarm_contact_info = {
+            'status': output.get(f'ALARM CONTACT {contact_number}', {}).get('status', ''),
+            'trigger': output.get(f'ALARM CONTACT {contact_number}', {}).get('trigger', ''),
+            'severity': output.get(f'ALARM CONTACT {contact_number}', {}).get('severity', '')
+        }
+        if not alarm_contact_info['status'] and not alarm_contact_info['trigger'] and not alarm_contact_info['severity']:
+            raise KeyError(f"ALARM CONTACT {contact_number} not found")
+        
+    except SchemaEmptyParserError as e:
+        log.error(f"No alarm contact information found on device {device.name}: {e}")
+        raise Exception("No alarm contact information found")
+    
+    except KeyError as e:
+        log.error(f"Alarm contact {contact_number} not found on device {device.name}: {e}")
+        raise Exception(f"Alarm contact {contact_number} not found")
+    
+    return alarm_contact_info
+    

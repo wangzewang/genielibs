@@ -74,15 +74,35 @@ def execute_set_config_register(device, config_register, timeout=300):
             config_reg ('str'): Hexadecimal value to set the config register to
             timeout ('int'): Max time to set config-register in seconds
     '''
+    # Collect all connections to process
+    conn_list = getattr(device, 'subconnections', None) or [device.default]
 
-    try:
-        device.configure("config-register {}".format(config_register),
-                         timeout=timeout)
-    except Exception as e:
-        raise Exception("Failed to set config register for '{d}'\n{e}".\
-                        format(d=device.name, e=str(e)))
-    else:
-        log.info("Set config-register to '{}'".format(config_register))
+    # Iterate through each connection to apply the configuration.
+    for conn in conn_list:
+        # Not implemented for rommon state
+        if conn.state_machine.current_state == 'rommon':
+            continue
+        # If the device is in standby state, skip it.
+        # Otherwise, the standby will fail if locked.
+        elif conn.role == "standby":
+            continue
+        try:
+            conn.configure("config-register {}".format(config_register),
+                            timeout=timeout)
+        except Exception as e:
+            raise Exception("Failed to set config register for '{d}'\n{e}".\
+                            format(d=device.name, e=str(e)))
+        else:
+            log.info("Set config-register to '{}'".format(config_register))
+
+
+def execute_rommon_reset(device, timeout=300):
+    '''To execute the reset command in rommon mode
+        Args:
+            device ('obj'): Device object
+            timeout ('int'): Max time to set config-register in seconds
+    '''
+    log.info("API is not implemented.")
 
 
 def _execute_write_erase(device, timeout=300):
@@ -765,6 +785,24 @@ def hardware_qfp_active_statistics_drop_clear(device):
     except SubCommandFailure as e:
         log.error(e)
         raise SubCommandFailure(f"Could not execute cler qfp stats drop command")
+
+def hardware_qfp_active_feature_alg_statistics_sip_clear(device):
+    """ execute clear harware qfp active feature alg stats sip clear command
+        Args:
+            device ('obj'): Device object
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+
+    cmd = "show platform hardware qfp active feature alg statistics sip clear"
+
+    try:
+        device.execute(cmd)
+    except SubCommandFailure as e:
+        log.error(e)
+        raise SubCommandFailure(f"Could not execute cler qfp stats sip command")
 
 def hardware_qfp_active_ipsec_data_drop_clear(device):
     """ execute clear harware active ipsec data drop clear command
@@ -1934,20 +1972,27 @@ def request_platform_hardware_pfu(device, mode, route_processor, slot, action):
     except SubCommandFailure as e:
         raise SubCommandFailure(f"Failed to perform powerslot  off/on Error:\n{e}")
 
-def request_platform_software_trace_archive(device):
-    """Request platform software trace archive
-    Args:
-        device (`obj`): Device object
-    Return:
-        None
-    Raise:
-        SubCommandFailure: Failed configuring
-    """
+def request_platform_software_trace_archive(device, timeout=300):
+    ''' Request platform software trace archive
+
+        Args:
+            device ('obj'): Device object
+            timeout ('int'): Max time to wait for command to complete (in seconds)
+
+        Returns:
+            None
+
+        Raises:
+            Exception: If command fails
+    '''
     cmd = "request platform software trace archive"
+
     try:
-        device.execute(cmd)
-    except SubCommandFailure as e:
-        raise SubCommandFailure(f"Could not perform request platform software trace archive on {device}. Error:\n{e}")
+        device.execute(cmd, timeout=timeout)
+    except Exception as e:
+        raise Exception(f"Failed to execute '{cmd}' on '{device.name}'\n{str(e)}")
+    else:
+        log.info(f"Successfully executed '{cmd}' on device {device.name}")
 
 
 def execute_issu_set_rollback_timer(device, timer=0):
@@ -1986,3 +2031,162 @@ def execute_diagnostic_start_module_port(device, module_number, test_id, port_nu
         raise SubCommandFailure(
             f"Could not execute diagnostic start module {module_number} test {test_id} port {port_num} on device. Error:\n{e}")
 
+def execute_show_clear_sip_l7_alg_statistics(device):
+    """execute 'show platform hardware qfp active feature alg statistics sip l7data clear*' on device
+       Args:
+            device('obj'): device object
+       Returns:
+            None
+       Raises:
+            SubCommandFailure
+    """
+    try:
+        device.execute("show platform hardware qfp active feature alg statistics sip l7data clear")
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Failed to execute show platform hardware qfp active feature alg statistics sip l7data clear\n{e}'
+        )
+
+def execute_hardware_qfp_active_feature_nat_datapath_pap_laddrpergaddr(device):
+    """execute 'show platform hardware qfp active feature nat datapath pap laddrpergaddr' on device
+       Args:
+            device('obj'): device object
+       Returns:
+            None
+       Raises:
+            SubCommandFailure
+    """
+    try:
+        device.execute("show platform hardware qfp active feature nat datapath pap laddrpergaddr")
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Failed to execute show platform hardware qfp active feature nat datapath pap laddrpergaddr on device. Error: {e}'
+        )
+
+def execute_test_platform_software_process_exit_forwarding_manager(device, processor, state):
+    """
+    Execute 'test platform software process exit forwarding-manager <RP/FP> <active/standby>' command on the device.
+
+    Args:
+        device (obj): Device object
+        processor (str): Route processor/Embedded-Service-Processor identifier,  (e.g., 'RP' or 'FP')
+        state (str): processor state instance ('active' or 'standby')
+
+    Returns:
+        None
+        
+    Raises:
+        SubCommandFailure: Failed to execute the command
+    """
+    log.info(f"Executing test platform software process exit forwarding-manager {processor} {state} on {device}")
+
+    command = f"test platform software process exit forwarding-manager {processor} {state}"
+
+    try:
+        device.execute(command)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(f"Failed to execute test platform software process exit forwarding-manager. Error:\n{e}")
+
+def execute_platform_hardware_chassis_fantray_oir(device, fantray_number, action, timeout=60):
+    """ Execute 'test platform hardware chassis fantray <fantray_number> oir <action>' on the device
+
+    Args:
+        device ('obj'): Device object
+        fantray_number ('int', optional): Fantray number (default: 1)
+        action ('str', optional): OIR action, e.g. 'remove', 'insert' (default: 'remove')
+        timeout ('int', optional): Max time for command execution (default: 60)
+
+    Returns:
+        None
+
+    Raises:
+        SubCommandFailure
+    """
+    cmd = f"test platform hardware chassis fantray {fantray_number} oir {action}"
+    try:
+        device.execute(cmd, timeout=timeout)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to execute '{cmd}' on device {device.name}. Error:\n{e}"
+        )
+
+def execute_show_policy_firewall_config_platform(device, filter_option=None):
+    """Execute 'show policy-firewall config platform' on device
+       Args:
+            device('obj'): device object
+            filter_option('str', optional): Filter option to append to the command.
+                                          Examples: 'include <pattern>', 'exclude <pattern>', 
+                                          'begin <pattern>', 'section <pattern>'
+       Returns:
+            str: Command output
+       Raises:
+            SubCommandFailure
+    """
+    cmd = "show policy-firewall config platform"
+
+    # Add filter option if provided
+    if filter_option:
+        cmd = f"{cmd} | {filter_option}"
+
+    try:
+        output = device.execute(cmd)
+        return output
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Failed to execute {cmd} on device. Error: {e}'
+        )
+
+def execute_test_voice_port_detector_ring_trip(device, port, action):
+    """execute 'test voice port {port} detector ring-trip {action}' on device
+       Args:
+            device('obj'): device object
+            port ('str'): port number Ex: 1/0/0
+            action ('str'): on/off/disable
+       Returns:
+            None
+       Raises:
+            SubCommandFailure
+    """
+    cmd = f"test voice port {port} detector ring-trip {action}"
+    try:
+        device.execute(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to execute {cmd} on device. Error:\n{e}"
+        )
+
+def execute_show_platform_hardware_qfp_active_feature_td_datapath_statistics_clear(device):
+    """Execute 'show platform hardware qfp active feature td datapath statistics clear' on device
+       Args:
+            device('obj'): device object
+       Returns:
+            None
+       Raises:
+            SubCommandFailure
+    """
+    cmd = "show platform hardware qfp active feature td datapath statistics clear"
+
+    try:
+        device.execute(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Failed to execute {cmd} on device. Error: {e}'
+        )
+
+def execute_show_platform_hardware_qfp_active_feature_nat_datapath_bind(device):
+    """Execute 'show platform hardware qfp active feature nat datapath bind' on device
+       Args:
+            device ('obj'): Device object
+       Returns:
+            str: Command output
+       Raises:
+            SubCommandFailure
+    """
+    cmd = "show platform hardware qfp active feature nat datapath bind"
+    try:
+        output = device.execute(cmd)
+        return output
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to execute {cmd} on device. Error:\n{e}"
+        )

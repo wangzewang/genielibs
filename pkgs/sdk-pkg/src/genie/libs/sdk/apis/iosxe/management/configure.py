@@ -4,7 +4,8 @@ import atexit
 import logging
 import ipaddress
 import tempfile
-from unicon.eal.dialogs import Dialog
+import time
+from unicon.eal.dialogs import Statement, Dialog
 from genie.utils.timeout import Timeout
 from unicon.core.errors import SubCommandFailure
 from pyats.utils.secret_strings import to_plaintext
@@ -39,12 +40,22 @@ def configure_management_credentials(device, credentials='default', username=Non
             'aaa new-model',
             'aaa authentication login default local',
             'aaa authorization exec default local',
+            f'no username {username} secret',
             f'username {username} password 0 {password}',
             f'username {username} privilege 15'
         ])
 
+    configure_dialog = Dialog([
+        Statement(
+            pattern=r".*This operation will remove all username related configurations with same name.Do you want to continue\?\s*\[confirm\]\s*$",
+            action='sendline()',
+            loop_continue=True,
+            continue_timer=False,
+        ),
+    ])
+
     if config:
-        device.configure(config)
+        device.configure(config, reply=configure_dialog)
 
 
 def configure_management_vrf(device, vrf=None, protocols=None):
@@ -84,6 +95,8 @@ def configure_management_vrf(device, vrf=None, protocols=None):
 
     for p in protocols:
         if p not in vrfs.get('vrf', {}).get(vrf, {}).get('protocols', []):
+            if not vrf_config:
+                vrf_config.append(f'vrf definition {vrf}')
             vrf_config.extend([
                 f'address-family {p}',
                 'exit-address-family'
@@ -498,7 +511,8 @@ def configure_management_ssh(device,
                              credentials='default',
                              username=None,
                              password=None,
-                             domain_name='cisco.com'):
+                             domain_name='cisco.com',
+                             interface=None):
     '''
     Configure device for management via ssh.
 
@@ -508,10 +522,13 @@ def configure_management_ssh(device,
         username ('str', optional): username to ssh
         password ('str', optional): password to ssh
         domain_name ('str'): domain name to ssh
+        interface: (str) Management interface to use
 
     Returns:
         None
     '''
+    management = getattr(device, 'management', {})
+
     ssh_config = []
 
     device.api.configure_management_credentials(credentials,
@@ -519,6 +536,11 @@ def configure_management_ssh(device,
 
     if domain_name:
         ssh_config.append(f'ip domain name {domain_name}')
+
+    interface = interface or management.get('interface')
+
+    if interface:
+        ssh_config.append(f'ip ssh source-interface {interface}')
 
     ssh_config.extend([
         'crypto key generate rsa',
@@ -528,6 +550,7 @@ def configure_management_ssh(device,
         [r'How many bits in the modulus \[\d+\]:\s*$', 'sendline()', None, True, False],
         [r'Do you really want to replace them\? \[yes/no\]:\s*$', 'sendline(yes)', None, True, False]
         ])
+
     device.configure(ssh_config, reply=dialog)
 
     device.api.configure_management_vty_lines(
@@ -942,6 +965,113 @@ def configure_ip_ssh_version(device, version):
     except SubCommandFailure as e:
         raise SubCommandFailure(f"Failed to configure ip ssh version on device {device}. Error:\n{e}")
 
+def configure_line_vty_ipv4_access_class(device, firstline_id, lastline_id, access_list_name=None, access_mode=None, acl_no=None, expanded_acl_no=None):
+    """ configure_line_vty_ipv4_access_class
+        Args:
+            device ('obj'): device to execute on
+            firstline_id ('int') : firstline identifier
+            lastline_id ('int') :  lastline identifier
+            access_list_name ('str') : access list name
+            access_mode ('str') : access mode (in or out)
+            acl_no ('str') : acl number
+            expanded_acl_no ('str') : expanded acl number
+
+        Return:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = [f"line vty {firstline_id} {lastline_id}"]
+    if access_list_name:
+        cmd.append(f"access-class {access_list_name} {access_mode}")
+    elif acl_no:
+        cmd.append(f"access-class {acl_no} {access_mode}")
+    elif expanded_acl_no:
+        cmd.append(f"access-class {expanded_acl_no} {access_mode}")
+
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to configure_line_vty_ipv4_access_class Error {e}")
+
+def configure_line_vty_ipv6_access_class(device, firstline_id, lastline_id, access_list_name, access_mode):
+    """ configure_line_vty_ipv6_access_class
+        Args:
+            device ('obj'): device to execute on
+            firstline_id ('int') : firstline identifier
+            lastline_id ('int') :  lastline identifier
+            access_list_name ('str') : access list name 
+            access_mode ('str') : access mode (in or out)
+
+        Return:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = [
+        f"line vty {firstline_id} {lastline_id}",
+        f"ipv6 access-class {access_list_name} {access_mode}"
+    ]
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to configure_line_vty_ipv6_access_class Error {e}")
+
+def unconfigure_line_vty_ipv4_access_class(device, firstline_id, lastline_id, access_list_name=None, access_mode=None, acl_no=None, expanded_acl_no=None):
+    """ unconfigure_line_vty_ipv4_access_class
+        Args:
+            device ('obj'): device to execute on
+            firstline_id ('int'): firstline identifier
+            lastline_id ('int'): lastline identifier
+            access_list_name ('str'): access list name
+            access_mode ('str'): access mode (in or out)
+            acl_no ('str'): access list number
+            expanded_acl_no ('str'): expanded access list number
+
+        Return:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = [f"line vty {firstline_id} {lastline_id}"]
+    if access_list_name:
+        cmd.append(f"no access-class {access_list_name} {access_mode}")
+    elif acl_no:
+        cmd.append(f"no access-class {acl_no} {access_mode}")
+    elif expanded_acl_no:
+        cmd.append(f"no access-class {expanded_acl_no} {access_mode}")
+
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to unconfigure_line_vty_ipv4_access_class Error {e}")
+
+def unconfigure_line_vty_ipv6_access_class(device, firstline_id, lastline_id, access_list_name, access_mode):
+    """ unconfigure_line_vty_ipv6_access_class
+        Args:
+            device ('obj'): device to execute on
+            firstline_id ('int') : firstline identifier
+            lastline_id ('int') : lastline identifier
+            access_list_name ('str') : access list name 
+            access_mode ('str') : access mode (in or out)
+
+        Return:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = [
+        f"line vty {firstline_id} {lastline_id}",
+        f"no ipv6 access-class {access_list_name} {access_mode}"
+    ]
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Failed to unconfigure_line_vty_ipv6_access_class Error {e}")
 
 def unconfigure_ip_ssh_version(device, version):
 
@@ -1385,3 +1515,175 @@ def configure_ip_ssh_server_algorithm_hostkey(device, hostkey):
         device.configure(cmd)
     except SubCommandFailure as e:
         raise SubCommandFailure(f"Failed to configure ip ssh server algorithm hostkey on device {device}. Error:\n{e}")
+
+def configure_ip_ssh_pubkey_chain(device, username=None, server=None, key_string=None, key_hash=None, chunk_size=None):
+    """ Configure SSH public key chain for a user or server
+        Args:
+            device ('obj'): Device object
+            username ('str', optional): Username for SSH public key authentication
+            server ('str', optional): Server IP address for SSH public key authentication
+            key_string ('str', optional): SSH public key string (can be single line or multi-line)
+            key_hash ('str', optional): SSH public key hash (can include key type prefix or just the hash)
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    # Validate that either username or server is provided, but not both
+    if not username and not server:
+        raise SubCommandFailure("Either username or server must be provided")
+    if username and server:
+        raise SubCommandFailure("Cannot provide both username and server, choose one")
+
+    # Validate that either key_string or key_hash is provided, but not both
+    if not key_string and not key_hash:
+        raise SubCommandFailure("Either key_string or key_hash must be provided")
+    if key_string and key_hash:
+        raise SubCommandFailure("Cannot provide both key_string and key_hash, choose one")
+
+    # Determine the target (username or server)
+    target_type = "username" if username else "server"
+    target_value = username if username else server
+
+    log.debug("Configuring SSH public key chain for {} {}".format(target_type, target_value))
+
+    if key_string:
+        normalized_key = ' '.join(key_string.strip().split())
+        
+        folded_lines = []
+        for i in range(0, len(normalized_key), chunk_size):
+            folded_lines.append(normalized_key[i:i+chunk_size])
+        
+        def send_key_string(spawn, context, session):
+            """Send the SSH key string in folded format"""
+            try:
+                # Send each folded line with small delays to prevent buffer overflow
+                for i, line in enumerate(folded_lines):
+                    log.debug("Sending line {}/{}: {}...".format(i+1, len(folded_lines), line[:30]))
+                    spawn.sendline(line)
+                
+                # Send exit to exit from key-string mode
+                spawn.sendline('exit')
+                
+            except Exception as e:
+                log.error("Error in send_key_string dialog: {}".format(str(e)))
+                raise SubCommandFailure("Failed to send key string: {}".format(str(e)))
+
+        # Create dialog to handle key-string input
+        dialog = Dialog([
+            Statement(
+                pattern=r'.*\(conf-ssh-pubkey-data\)#\s*$',
+                action=send_key_string,
+                loop_continue=False,
+                continue_timer=False
+            )
+        ])
+
+        # Configuration commands to enter key-string mode
+        config = [
+            'ip ssh pubkey-chain',
+            '{} {}'.format(target_type, target_value),
+            'key-string'
+        ]
+
+        try:
+            output = device.configure(config, reply=dialog, timeout=120)
+            
+        except SubCommandFailure as e:
+            log.error("Configuration failed: {}".format(str(e)))
+            raise SubCommandFailure("Failed to configure SSH public key chain (key-string) for {} {} on device {}. Error:\n{}".format(target_type, target_value, device, e))
+
+    elif key_hash:
+        
+        if key_hash.startswith('ssh-rsa ') or key_hash.startswith('ecdsa-sha2-') or key_hash.startswith('ssh-ed25519 '):
+            # Key type already specified - use as-is
+            formatted_key_hash = key_hash
+            
+        else:
+            # Just a hash provided - need to detect/assume key type
+            detected_key_type = "ssh-rsa"
+            formatted_key_hash = "{} {}".format(detected_key_type, key_hash)
+    
+        config = [
+            'ip ssh pubkey-chain',
+            '{} {}'.format(target_type, target_value),
+            'key-hash {}'.format(formatted_key_hash)
+        ]
+
+        try:
+            device.configure(config, timeout=30)
+            
+        except SubCommandFailure as e:
+            log.error("Key-hash configuration failed: {}".format(str(e)))
+            raise SubCommandFailure("Failed to configure SSH public key chain (key-hash) for {} {} on device {}. Error:\n{}".format(target_type, target_value, device, e))
+
+
+def unconfigure_ip_ssh_pubkey_chain(device, username=None, server=None):
+    """ Unconfigure SSH public key chain for a user or server
+        Args:
+            device ('obj'): Device object
+            username ('str', optional): Username to remove from SSH public key authentication
+            server ('str', optional): Server IP address to remove from SSH public key authentication
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    # Validate that either username or server is provided, but not both
+    if not username and not server:
+        raise SubCommandFailure("Either username or server must be provided")
+    if username and server:
+        raise SubCommandFailure("Cannot provide both username and server, choose one")
+
+    # Determine the target (username or server)
+    target_type = "username" if username else "server"
+    target_value = username if username else server
+
+    log.debug("Unconfiguring SSH public key chain for {} {}".format(target_type, target_value))
+
+    config = [
+        'ip ssh pubkey-chain',
+        'no {} {}'.format(target_type, target_value)
+    ]
+
+    try:
+        device.configure(config)
+        
+    except SubCommandFailure as e:
+        raise SubCommandFailure("Failed to unconfigure SSH public key chain for {} {} on device {}. Error:\n{}".format(target_type, target_value, device, e))
+
+
+def configure_ip_ssh_stricthostkeycheck(device):
+    """ Configure ip ssh stricthostkeycheck
+        Args:
+            device ('obj'): Device object
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = 'ip ssh stricthostkeycheck'
+    try:
+        log.debug("Configuring SSH strict host key checking on device {}".format(device))
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        log.error("Failed to configure SSH strict host key checking on device {}. Error: {}".format(device, e))
+        raise SubCommandFailure("Failed to configure ip ssh stricthostkeycheck on device {}. Error:\n{}".format(device, e))
+
+
+def unconfigure_ip_ssh_stricthostkeycheck(device):
+    """ Unconfigure ip ssh stricthostkeycheck
+        Args:
+            device ('obj'): Device object
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    cmd = 'no ip ssh stricthostkeycheck'
+    try:
+        log.debug("Unconfiguring SSH strict host key checking on device {}".format(device))
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        log.error("Failed to unconfigure SSH strict host key checking on device {}. Error: {}".format(device, e))
+        raise SubCommandFailure("Failed to unconfigure ip ssh stricthostkeycheck on device {}. Error:\n{}".format(device, e))

@@ -2,6 +2,7 @@
 
 # Python
 import re
+import os
 import logging
 import subprocess
 import time
@@ -464,18 +465,21 @@ def delete_files(device, locations, filenames):
 
             # find target files by using Dq with regex
             matched_files = parsed.q.contains_key_value(
-                'files', filename, value_regex=True).get_values('files')
+                'files', os.path.basename(filename), value_regex=True).get_values('files')
             log.debug('Matched files to delete: {matched_files}'.format(
                 matched_files=matched_files))
             # delete files which were found
             for file in matched_files:
-                if location[-1] != '/':
-                    location += '/'
-                device.execute('delete /force {location}{file}'.format(
-                    location=location, file=file))
+                # Detect if filename is already an absolute path
+                if ':' in file:
+                    full_path = file
+                else:
+                    if location[-1] != '/':
+                        location += '/'
+                    full_path = '{location}{file}'.format(location=location, file=file)
+                device.execute('delete /force {full_path}'.format(full_path=full_path))
                 # build up list for return
-                deleted_files.append('{location}{file}'.format(
-                    location=location, file=file))
+                deleted_files.append(full_path)
 
     return deleted_files
 
@@ -1174,9 +1178,6 @@ def perform_ssh(device,hostname, ip_address, username, password, vrf=None, enabl
                 'enable_pass_flag': False
                 }
 
-    def pass_timeout_expire():
-        ssh_dict['pass_timeout_expire_flag'] = True
-
     def send_pass(spawn):
         if ssh_dict['enable_pass_flag']:
             spawn.sendline(enable_pass)
@@ -1208,10 +1209,6 @@ def perform_ssh(device,hostname, ip_address, username, password, vrf=None, enabl
         spawn.sendline('enable')
 
     dialog = Dialog([
-
-            Statement(pattern=r"Password:\s*timeout expired!",
-                      action=pass_timeout_expire,
-                      loop_continue=False),
             Statement(pattern=r"Password:",
                       action=send_pass,
                       loop_continue=True),
@@ -1250,10 +1247,8 @@ def perform_ssh(device,hostname, ip_address, username, password, vrf=None, enabl
     except Exception as e:
         log.info(f"Error occurred while performing ssh : {e}")
 
-    if ssh_dict['pass_timeout_expire_flag']:
-        return False
-    if ssh_dict['ssh_pass_case_flag']:
-        return True
+    # Return True only if prompt was reached, else False (e.g., auth failed, connection closed, timeout)
+    return ssh_dict['ssh_pass_case_flag']
 
 
 def concurrent_ssh_sessions(concurrent_sessions, device, ip_address, username, password,
@@ -1519,9 +1514,6 @@ def perform_telnet(device, hostname, ip_address, username, password, vrf=None, e
                 'enable_pass_flag': False
                 }
 
-    def pass_timeout_expire():
-        telnet_dict['pass_timeout_expire_flag'] = True
-
     def send_pass(spawn):
         if telnet_dict['enable_pass_flag']:
             spawn.sendline(enable_pass)
@@ -1541,10 +1533,6 @@ def perform_telnet(device, hostname, ip_address, username, password, vrf=None, e
         spawn.sendline('enable')
 
     dialog = Dialog([
-
-            Statement(pattern=r".*timeout expired!",
-                      action=pass_timeout_expire,
-                      loop_continue=False),
             Statement(pattern=r"Password:",
                       action=send_pass,
                       loop_continue=True),
@@ -1572,11 +1560,8 @@ def perform_telnet(device, hostname, ip_address, username, password, vrf=None, e
 
     except Exception as e:
         log.info(f"Error occurred while performing telnet : {e}")
-
-    if telnet_dict['pass_timeout_expire_flag']:
-        return False
-    if telnet_dict['telnet_pass_case_flag']:
-        return True
+    # Return True only if prompt was reached, else False (e.g., auth failed, connection closed, timeout)
+    return telnet_dict['telnet_pass_case_flag']
 
 
 def verify_ospf_icmp_ping(
@@ -1897,8 +1882,8 @@ def upgrade_hw_module_subslot_sfp(device, slot , sfp, image=None,timeout=180):
         cmd =f'upgrade hw-module subslot {slot} sfp {sfp} {image}'
         try:
             output = device.execute(cmd,reply=dialog,timeout=timeout)
-            m = re.search('(firmware update success!!)',output)
-            m1 = re.search('.*(Firmware already up to date)',output)
+            m = re.search(r'(firmware update success!!)',output)
+            m1 = re.search(r'.*(Firmware already up to date)',output)
             if m:
                 return True
             elif m1:
@@ -1915,8 +1900,8 @@ def upgrade_hw_module_subslot_sfp(device, slot , sfp, image=None,timeout=180):
         cmd =f'upgrade hw-module subslot {slot} sfp {sfp}'
         try:
             output = device.execute(cmd,reply=dialog,timeout=timeout)
-            m = re.search('(firmware update success!!)',output)
-            m1 = re.search('.*(Firmware already up to date)',output)
+            m = re.search(r'(firmware update success!!)',output)
+            m1 = re.search(r'.*(Firmware already up to date)',output)
             if m:
                 return True
             elif m1:
@@ -2001,12 +1986,12 @@ def upgrade_rom_monitor_capsule_golden(device, switch_type, rp, timeout=420):
         log.warning(e)
         return None
     else:
-        if re.search('.*([DONE])',output):
+        if re.search(r'.*([DONE])',output):
             return True
-        if re.search('.*(Golden Upgrade not supported)',output):
+        if re.search(r'.*(Golden Upgrade not supported)',output):
             log.info('Golden Upgrade not supported!')
             return True
-        if re.search('.*(Press RETURN to get started.)',output):
+        if re.search(r'.*(Press RETURN to get started.)',output):
             log.info('Golden Upgrade is Successful!')
             return True
 
@@ -2119,19 +2104,39 @@ def password_recovery(device, console_activity_pattern='',
     else:
         device.enable()
 
-    # step:5 Configure the login credentials
+    # step:5 Init connection settings (term length, etc.)
+    log.info('Initialize connection settings')
+    device.connection_provider.init_connection()
+
+    # step:6 Configure the login credentials
     log.info(f'Configure the login credentials {device.name}')
     device.api.configure_management_credentials()
 
-    # step:6 Unconfigure the ignore startup config
+    # step:7 Unconfigure the ignore startup config
     log.info(f'Unconfigure the ignore startup config {device.name}')
     device.api.unconfigure_ignore_startup_config()
 
-    # step:7 verify the rommon variable
+    # step:8 verify the rommon variable
     log.info(f'verify the ignore startup config {device.name}')
     if not device.api.verify_ignore_startup_config():
         raise Exception(f"Failed to unconfigure the ignore startup config on {device.name}")
 
-    # step:8 Execute write memory
+    # step:9 Execute write memory
     log.info(f'Executing write memory {device.name}')
     device.api.execute_write_memory()
+
+
+
+def configure_generic_command(device,cmd):
+    """
+    Configure a command and return the output.
+    Args:
+        cmd (str): The command to configure.
+    Returns:
+        The output of the configured command.
+    """
+    try:
+        output=device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(f"Could not configure command '{cmd}' on {device}. Error:\n{e}")
+    return output

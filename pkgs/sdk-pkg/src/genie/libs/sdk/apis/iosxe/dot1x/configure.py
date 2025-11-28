@@ -54,6 +54,8 @@ def configure_dot1x_cred_profile(device, profile_name, user_name, passwd, passwd
         cmd += 'password 7 {}\n'.format(passwd)
     elif passwd_type == 'UNENCRYPTED':
         cmd += 'password 0 {}\n'.format(passwd)
+    elif passwd_type == 'ENCRYPTED':
+        cmd += 'password 6 {}\n'.format(passwd)
     else:
         cmd += 'password {}\n'.format(passwd)
     #cmd += 'password {}\n'.format(passwd)
@@ -176,7 +178,7 @@ def configure_mode_to_eEdge(device):
     """
     cmd = 'authentication convert-to new-style forced'
     out = device.execute('authentication display config-mode')
-    matchout = re.search('legacy',out)
+    matchout = re.search(r'legacy',out)
     if matchout is not None:
         log.info("convert-to new-style")
         try:
@@ -198,7 +200,7 @@ def enable_autoconf(device):
             SubCommandFailure: Failed to enable autoconf
     """
     out = device.execute('authentication display config-mode')
-    matchout = re.search('legacy', out)
+    matchout = re.search(r'legacy', out)
     if matchout is not None:
         log.info('Switch is in legacy mode, converting to new-style')
         cmd = ''
@@ -226,7 +228,7 @@ def configure_access_session_monitor(device):
             SubCommandFailure: Failed to enable access-session monitor
     """
     out = device.execute('authentication display config-mode')
-    matchout = re.search('legacy', out)
+    matchout = re.search(r'legacy', out)
     if matchout is not None:
         log.info('Switch is in legacy mode, converting to new-style')
         cmd = ''
@@ -255,7 +257,7 @@ def configure_access_session_sticky(device, timer):
             SubCommandFailure: Failed to configure interface-template sticky timer
     """
     out = device.execute('authentication display config-mode')
-    matchout = re.search('legacy', out)
+    matchout = re.search(r'legacy', out)
     if matchout is not None:
         log.info('Switch is in legacy mode, converting to new-style')
         cmd = ''
@@ -2443,3 +2445,4 @@ def unconfigure_access_session_tls_version(device):
         raise SubCommandFailure(
             "Could not unconfigure access-session tls-version. Error: {}".format(str(e))
         )
+

@@ -897,7 +897,7 @@ def copy_to_device(device,
                    remote_path,
                    local_path=None,
                    server=None,
-                   protocol='http',
+                   protocol=None,
                    vrf=None,
                    timeout=300,
                    compact=False,
@@ -914,7 +914,7 @@ def copy_to_device(device,
         remote_path (str): remote file path on the server
         local_path (str): local file path to copy to on the device (default: flash:)
         server (str): hostname or address of the server (default: None)
-        protocol(str): file transfer protocol to be used (default: http)
+        protocol(str): file transfer protocol to be used (default: https)
         vrf (str): vrf to use (optional)
         timeout(int): timeout value in seconds, default 300
         compact(bool): compress image option for n9k, defaults False
@@ -941,8 +941,8 @@ def copy_to_device(device,
         fu = FileUtils.from_device(device, protocol=protocol)
 
     if server:
-        server_block = fu.get_server_block(server)
-        protocol = server_block.get('protocol', protocol)
+        server_block = fu.get_server_block(server, protocol=protocol)
+        protocol = protocol or server_block.get('protocol')
 
         # re-instantiate FileUtils object now we have protocol
         fu = FileUtils.from_device(device, protocol=protocol)
@@ -1005,26 +1005,35 @@ def copy_to_device(device,
     if proxy_dev:
         proxy_dev.connect()
         local_ip = proxy_dev.api.get_local_ip()
+
+        if ipv4_address := device.management.get('address', {}).get('ipv4'):
+            mgmt_ip = str(ipv4_address.ip)
+            _, mgmt_src_ip = proxy_dev.api.get_route_iface_source_ip(destination_ip=mgmt_ip)
+            mgmt_src_ip_addresses = [mgmt_src_ip] if mgmt_src_ip else []
+            mgmt_interface = device.management.get('interface', None)
+        else:
+            raise Exception('Device management IPv4 address not found')
     else:
         local_ip = device.api.get_local_ip()
+        mgmt_ip, mgmt_src_ip_addresses = device.api.get_mgmt_ip_and_mgmt_src_ip_addresses()
+        mgmt_interface = kwargs.pop('interface', None) or device.api.get_mgmt_interface(mgmt_ip=mgmt_ip)
+
+        if local_ip in mgmt_src_ip_addresses:
+            mgmt_src_ip = local_ip
+        else:
+            mgmt_src_ip = None
 
     if local_ip is None:
         log.error('Unable to determine local IP address, cannot copy file')
         return
 
-    mgmt_ip, mgmt_src_ip_addresses = device.api.get_mgmt_ip_and_mgmt_src_ip_addresses()
-
-    mgmt_interface = kwargs.pop('interface', None) or device.api.get_mgmt_interface(mgmt_ip=mgmt_ip)
-
-    if local_ip in mgmt_src_ip_addresses:
-        mgmt_src_ip = local_ip
-    else:
-        mgmt_src_ip = None
-
     remote_path_parent = str(pathlib.PurePath(remote_path).parent)
     remote_filename = pathlib.PurePath(remote_path).name
 
     protocol = protocol or 'http'
+    # TODO: Remove once https is supported in FileServer
+    if protocol == 'https':
+        protocol = 'http'
 
     with FileServer(protocol=protocol,
                     address=local_ip,
@@ -1037,21 +1046,8 @@ def copy_to_device(device,
 
         if proxy_dev:
             log.info('Setting up port relay via proxy')
-            proxy_dev = proxy_dev or device.testbed.devices.get(proxy)
-            if proxy_dev is None and device.testbed.servers.get(proxy):
-                 proxy_dev = device.api.convert_server_to_linux_device('proxy')
-
-            proxy_dev.connect()
             socat_protocol = 'UDP4' if protocol == 'tftp' else 'TCP4'
             proxy_port = proxy_dev.api.socat_relay(remote_ip=local_ip, remote_port=local_port, protocol=socat_protocol)
-
-            ifconfig_output = proxy_dev.execute('ifconfig')
-            proxy_ip_addresses = re.findall(r'inet (?:addr:)?(\S+)', ifconfig_output)
-            mgmt_src_ip = None
-            for proxy_ip in proxy_ip_addresses:
-                if proxy_ip in mgmt_src_ip_addresses:
-                    mgmt_src_ip = proxy_ip
-                    break
 
         if protocol.startswith('http') and http_auth:
             username = fs.get('credentials', {}).get('http', {}).get('username', '')
@@ -1183,22 +1179,27 @@ def copy_from_device(device,
     if proxy_dev:
         proxy_dev.connect()
         local_ip = proxy_dev.api.get_local_ip()
+
+        if ipv4_address := device.management.get('address', {}).get('ipv4'):
+            mgmt_ip = str(ipv4_address.ip)
+            _, mgmt_src_ip = proxy_dev.api.get_route_iface_source_ip(destination_ip=mgmt_ip)
+            mgmt_src_ip_addresses = [mgmt_src_ip] if mgmt_src_ip else []
+            mgmt_interface = device.management.get('interface', None)
+        else:
+            raise Exception('Device management IPv4 address not found')
     else:
         local_ip = device.api.get_local_ip()
+        mgmt_ip, mgmt_src_ip_addresses = device.api.get_mgmt_ip_and_mgmt_src_ip_addresses(mgmt_src_ip=local_ip)
+        mgmt_interface = device.api.get_mgmt_interface(mgmt_ip=mgmt_ip)
+
+        if local_ip in mgmt_src_ip_addresses:
+            mgmt_src_ip = local_ip
+        else:
+            mgmt_src_ip = None
 
     if local_ip is None:
         log.error('Unable to determine local IP address, cannot copy file')
         return
-
-    # Try to determine connectivity to device
-    mgmt_ip, mgmt_src_ip_addresses = device.api.get_mgmt_ip_and_mgmt_src_ip_addresses(mgmt_src_ip=local_ip)
-
-    mgmt_interface = device.api.get_mgmt_interface(mgmt_ip=mgmt_ip)
-
-    if local_ip in mgmt_src_ip_addresses:
-        mgmt_src_ip = local_ip
-    else:
-        mgmt_src_ip = None
 
     # Determine filename and path
     remote_path = remote_path or '.'
@@ -1210,11 +1211,7 @@ def copy_from_device(device,
         filename = None
 
     if not filename:
-        filename = pathlib.Path(os.path.basename(local_path.split(':')[-1]))
-        if device.hostname not in str(filename):
-            filename = '{}_{}'.format(device.hostname, slugify(filename.stem) + filename.suffix)
-        else:
-            filename = '{}'.format(slugify(filename.stem) + filename.suffix)
+        filename = slugify_filename(device, local_path)
 
     if timestamp:
         ts = datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')[:-3]
@@ -1231,18 +1228,8 @@ def copy_from_device(device,
 
         if proxy_dev:
             log.info('Setting up port relay via proxy')
-            proxy_dev = proxy_dev or device.testbed.devices[proxy]
-            proxy_dev.connect()
             socat_protocal = 'UDP4' if protocol == 'tftp' else 'TCP4'
             proxy_port = proxy_dev.api.socat_relay(remote_ip=local_ip, remote_port=local_port, protocol=socat_protocal)
-
-            ifconfig_output = proxy_dev.execute('ifconfig')
-            proxy_ip_addresses = re.findall(r'inet (?:addr:)?(\S+)', ifconfig_output)
-            mgmt_src_ip = None
-            for proxy_ip in proxy_ip_addresses:
-                if proxy_ip in mgmt_src_ip_addresses:
-                    mgmt_src_ip = proxy_ip
-                    break
 
         if protocol.startswith('http') and http_auth:
             username = fs.get('credentials', {}).get('http', {}).get('username', '')
@@ -2242,6 +2229,34 @@ def slugify(word):
 
     """
     return re.sub(r'\W+', '_', word)
+
+def slugify_filename(device, local_path, suffixes=None):
+    """
+    Build a safe export filename from a device local_path.
+
+    Preserves multi-part suffixes (e.g. .tar.gz) if in suffixes list
+    but still slugifies base. Hostname is prepended if not already in filename.
+    """
+    if suffixes is None:
+        suffixes = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]
+
+    device_hostname = device.hostname 
+    filename = pathlib.Path(local_path.split(':')[-1])
+
+    # Determine if we have a multi-part suffix
+    full_suffix = ''.join(filename.suffixes)
+    if full_suffix in suffixes:
+        base = slugify(filename.name.split(full_suffix)[0])
+        preserved_suffix = full_suffix
+    else:
+        base = slugify(filename.stem)
+        preserved_suffix = filename.suffix
+
+    # Add hostname if missing
+    if device_hostname not in str(filename):
+        base = f"{device_hostname}_{base}"
+
+    return f"{base}{preserved_suffix}"
 
 
 def repeat_command_save_output(device, command, command_interval,

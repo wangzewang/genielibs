@@ -107,6 +107,11 @@ def execute_power_off_device(device):
 
         log.debug(f"Powercycled device '{device.name}' to 'off' state")
 
+    # Disconnect from proxy
+    for pc, outlets in pcs:
+        if pc.proxy_dev and pc.proxy_dev.connected:
+            pc.proxy_dev.disconnect()
+
 
 def execute_power_on_device(device):
     '''Power on a device
@@ -132,6 +137,11 @@ def execute_power_on_device(device):
             raise Exception(f"Failed to powercycle device on:\n{repr(e)}")
 
         log.debug(f"Powercycled device '{device.name}' to 'on' state")
+
+    # Disconnect from proxy
+    for pc, outlets in pcs:
+        if pc.proxy_dev and pc.proxy_dev.connected:
+            pc.proxy_dev.disconnect()
 
 
 def execute_power_cycle_device(device, delay=30, destroy=True):
@@ -418,7 +428,7 @@ def execute_copy_to_running_config(device, file, copy_config_timeout=60):
         raise Exception("Failed to apply config file {} to running-config\n{}".\
                         format(file, str(e)))
     else:
-        if re.search('^0 bytes.*', output):
+        if re.search(r'^0 bytes.*', output):
             raise Exception("Config file {} not applied to "\
                             "running-config - 0 bytes was copied".\
                             format(file))
@@ -441,7 +451,7 @@ def execute_copy_to_startup_config(device, file, dest='startup-config', copy_con
         raise Exception("Failed to apply config file {} to startup-config\n{}".\
                         format(file, str(e)))
     else:
-        if re.search('^0 bytes.*', output):
+        if re.search(r'^0 bytes.*', output):
             raise Exception("Config file {} not applied to "\
                             "startup-config - 0 bytes was copied".\
                             format(file))
@@ -464,55 +474,39 @@ def execute_copy_run_to_start(device, command_timeout=300, max_time=120,
         cmd += " vdc-all"
 
     # Build Unicon Dialogs
+    copy_run_to_start_dialog = Dialog([
+        Statement(
+            pattern=r'^.*Destination +(filename|file +name)(\s\(control\-c +to +(cancel|abort)\)\:)? +\[(\S+\/)?startup\-config]\?\s*$',
+            action='sendline()',
+            loop_continue=True,
+            continue_timer=False),
+        Statement(
+            pattern=r'.*proceed anyway\?.*$',
+            action='sendline(y)',
+            loop_continue=True,
+            continue_timer=False),
+        Statement(
+            pattern=r'Continue\? \[no\]:\s*$',
+            action='sendline(y)',
+            loop_continue=True,
+            continue_timer=False),
+        # XR platform specific when over-write the existing configurations
+        Statement(
+            pattern=r'Continue\? \[no\]:\s*$',
+            action='sendline(y)',
+            loop_continue=True,
+            continue_timer=False)
+    ])
 
-    startup = Statement(
-        pattern=r'^.*Destination +(filename|file +name)(\s\(control\-c +to +(cancel|abort)\)\:)? +\[(\S+\/)?startup\-config]\?\s*$',
-        action='sendline()',
-        loop_continue=True,
-        continue_timer=False)
+    output = device.execute(cmd, timeout=command_timeout,
+                            reply=copy_run_to_start_dialog)
 
-    proceed = Statement(
-        pattern=r'.*proceed anyway\?.*$',
-        action='sendline(y)',
-        loop_continue=True,
-        continue_timer=False)
+    # IOSXE platform
+    if "[OK]" in output or "Copy complete" in output:
+        return True
 
-    continue_cmd = Statement(
-        pattern=r'Continue\? \[no\]:\s*$',
-        action='sendline(y)',
-        loop_continue=True,
-        continue_timer=False)
+    return
 
-    # XR platform specific when over-write the existing configurations
-    yes_cmd = Statement(
-        pattern=r'^.*The +destination +file +already +exists\. +Do +you +want +to +overwrite\? +\[no\]\:',
-        action='sendline(y)',
-        loop_continue=True,
-        continue_timer=False)
-
-    # Begin timeout
-    timeout = Timeout(max_time, check_interval)
-    while timeout.iterate():
-        try:
-            output = device.execute(cmd, timeout=command_timeout,
-                                    reply=Dialog([startup, proceed, yes_cmd, continue_cmd]))
-        except Exception as e:
-            raise Exception("Cannot save running-config to startup-config {}".\
-                            format(str(e)))
-
-        # IOSXE platform
-        if "[OK]" in output or "Copy complete" in output:
-            break
-
-        # Copy in progress...
-        if "system not ready" in output or "Building configuration..." in output:
-            log.info("Still building configuration. Re-attempting save config "
-                     "after '{}' seconds".format(check_interval))
-            timeout.sleep()
-            continue
-    else:
-        # No break
-        raise Exception('Failed to save running-config to startup-config')
 
 def execute(device, *args, **kwargs):
     ''' execute command to device

@@ -1,35 +1,14 @@
-import os
-import unittest
-from pyats.topology import loader
+from unittest import TestCase
 from genie.libs.sdk.apis.iosxe.route_map.configure import unconfigure_route_map_permit
+from unittest.mock import Mock
 
 
-class TestUnconfigureRouteMapPermit(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(self):
-        testbed = f"""
-        devices:
-          Switch:
-            connections:
-              defaults:
-                class: unicon.Unicon
-              a:
-                command: mock_device_cli --os iosxe --mock_data_dir {os.path.dirname(__file__)}/mock_data --state connect
-                protocol: unknown
-            os: iosxe
-            platform: cat9k
-            type: router
-        """
-        self.testbed = loader.load(testbed)
-        self.device = self.testbed.devices['Switch']
-        self.device.connect(
-            learn_hostname=True,
-            init_config_commands=[],
-            init_exec_commands=[]
-        )
+class TestUnconfigureRouteMapPermit(TestCase):
 
     def test_unconfigure_route_map_permit(self):
-        result = unconfigure_route_map_permit(self.device, 'internal', 10, None, None, None, 30, 100, 45000, 500, 12, 20)
-        expected_output = None
-        self.assertEqual(result, expected_output)
+        self.device = Mock()
+        result = unconfigure_route_map_permit(self.device, 'TEST_RECURSIVE', '40', None, None, None, None, None, None, None, None, None, 'Mgmt-vrf', None, 'True', None, '10.106.16.20')
+        self.assertEqual(
+            self.device.configure.mock_calls[0].args,
+            (['route-map TEST_RECURSIVE permit 40', 'no set ip vrf Mgmt-vrf next-hop 10.106.16.20'],)
+        )

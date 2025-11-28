@@ -1177,7 +1177,7 @@ def configure_flow_record_match_collect_interface(device, record_name, direction
         raise SubCommandFailure(f'Could not configure flow record {record_name} interface. Error: {e}')
 
 
-def configure_flow_record_match_datalink(device, record_name, field_type, mac_type=None, direction=None):
+def configure_flow_record_match_datalink(device, record_name, field_type, mac_type=None, direction=None, vlan=False):
     """ Config Flow Record with match parameters on Device
         Args:
             device ('obj'): Device object
@@ -1185,6 +1185,7 @@ def configure_flow_record_match_datalink(device, record_name, field_type, mac_ty
             field_type ('str'): Field type. Ex: source, protocol etc.
             mac_type ('str', optional): source or destination mac type. Default is None.
             direction ('str', optional): input or output direction. Default is None.
+            vlan ('bool', optional): For datalink dot1q vlan {direction}. Default is False.
         Return:
             None
         Raise:
@@ -1198,7 +1199,10 @@ def configure_flow_record_match_datalink(device, record_name, field_type, mac_ty
     elif direction is None and mac_type is None:
         config.append(f'match datalink {field_type}')
     elif direction is not None and mac_type is None:
-        config.append(f'match datalink {field_type} {direction}')
+        if vlan:
+            config.append(f'match datalink {field_type} vlan {direction}')
+        else:
+            config.append(f'match datalink {field_type} {direction}')
     elif direction:
         config.append(f'match datalink {field_type} {mac_type} {direction}')
 
@@ -1401,7 +1405,8 @@ def configure_fnf_flow_record(
     collect_type_mask = None,
     collect_length = None,
     collect_ipv4_ttl = None,
-    collect_udp_ports = None
+    collect_udp_ports = None,
+    match_vrf = False
     ):
 
     """ Config Flow Record on Device
@@ -1432,6 +1437,7 @@ def configure_fnf_flow_record(
             collect_length('str', optional): configure ipv4 length total or header, default value is None
             collect_ipv4_ttl('str', optional): ttl value minimum or maximum to be configured, default value is None
             collect_udp_ports('str', optional): udp source-port or destination port to be configured, default value is None
+            match_vrf('bool'): Configure match routing vrf input
         Return:
             None
 
@@ -1485,6 +1491,8 @@ def configure_fnf_flow_record(
         configs.extend([f'collect ipv4 ttl {collect_ipv4_ttl}'])
     if collect_udp_ports:
         configs.extend([f'collect transport udp {collect_udp_ports}'])
+    if match_vrf:
+        configs.extend(['match routing vrf input'])
 
     try:
         device.configure(configs)
@@ -1678,6 +1686,36 @@ def configure_fnf_flow_record_match_flow(device, record_name, flow_name, cts_typ
         config.append(f'match flow observation point')
     elif flow_name == 'cts' and cts_type:
         config.append(f'match flow cts {cts_type} group-tag')
+    else:
+        config.append(f'match flow {flow_name}')
+    try:
+        device.configure(config)
+    except SubCommandFailure:
+        raise SubCommandFailure(f'Could not configure flow record {record_name}')
+    
+def configure_flow_record_transport(device, record_name, action="collect", transport_type="tcp flags", flags=None):
+
+    """ Configure Flow Record collect/match transport on Device
+        Args:
+            device ('obj'): Device object
+            record_name ('str'): Flow record name
+            action ('str'): collect or match. Default is collect
+            transport_type ('str'): source-port or destination-port or tcp flags. Default is tcp flags
+            flags ('list', optional): List object of flags. Default is None
+
+        Return:
+            None
+
+        Raise:
+            SubCommandFailure: Failed configuring Flow Record on Device
+    """
+
+    config = [f'flow record {record_name}']
+    if flags:
+        flags_str = " ".join(flags)
+        config.append(f'{action} transport {transport_type} {flags_str}')
+    else:
+        config.append(f'{action} transport {transport_type}')
     try:
         device.configure(config)
     except SubCommandFailure:
@@ -1760,6 +1798,30 @@ def unconfigure_device_sampler(device, sampler_name):
         log.error(f"Failed to unconfigure sampler {sampler_name} on device {device.name}. Error: {e}")
         raise SubCommandFailure(f'Could not unconfigure sampler {sampler_name}. Error:\n{e}')
     
+def configure_ipv6_flow_monitor_on_interface(device, interface, monitor_name, sampler_name, direction):
+    """Configure IPv6 flow monitor with sampler on a interface
+
+    Args:
+        device (`obj`): Device object
+        interface (`str`): Subinterface name (e.g., 'Te3/1/2')
+        monitor_name (`str`): IPv6 flow monitor name (e.g., 'm6out')
+        sampler_name (`str`): Sampler name user defined (e.g., 'sampler_random')
+        direction (`str`): Apply Flow Monitor on input/output traffic (eg. 'input/output')
+    Returns:
+        None
+    Raises:
+        SubCommandFailure: Failed configuring IPv6 flow monitor with sampler on subinterface
+    """
+    try:
+        device.configure([
+            f"interface {interface}",
+            f"ipv6 flow monitor {monitor_name} sampler {sampler_name} {direction}"
+        ])
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Could not configure ipv6 flow monitor {monitor_name} sampler {sampler_name} {direction} on {interface}. Error:\n{e}"
+        )
+
 def unconfigure_flow_exporter_from_monitor(device, monitor_name, exporter_name):
     """ Unconfigure Flow Exporter from Flow Monitor
         Args:
@@ -1781,3 +1843,182 @@ def unconfigure_flow_exporter_from_monitor(device, monitor_name, exporter_name):
         device.configure(cmd)
     except SubCommandFailure as e:
         raise SubCommandFailure(f'Could not unconfigure flow exporter {exporter_name}. Error:\n{e}')
+
+def unconfig_flow_monitor_on_vlan_interface(device, vlan_id,type,monitor_name,direction):
+    """ Unconfig Flow Monitor on vlan Interface
+
+        Args:
+            device (`obj`): Device object
+            vlan_id (`str`): Vlan Interface to be configured
+	    type (`str`): Type of flow monitor (eg. datalink,ip,ipv6)
+            monitor_name (`str`): Flow monitor name
+            direction (`str`): Direction of monitor (input/output)
+            
+        Return:
+            None
+        Raise:
+            SubCommandFailure: Failed configuring interface
+    """
+
+    try:
+        device.configure(["interface vlan {vlan_id}".format(vlan_id=vlan_id),
+                          "no {type} flow monitor {monitor_name} {direction}".format(type=type,monitor_name=monitor_name,direction=direction)])
+    except SubCommandFailure:
+        raise SubCommandFailure(
+            'Could not configure flow monitor {monitor_name} on vlan interface'.format(monitor_name=monitor_name)
+        )
+
+def configure_flow_record_with_match(device, record_name, description=None, match_values=None):
+    """ Config Flow record with match values on Device
+        Args:
+            device ('obj'): Device object
+            record_name ('str'): Flow record name
+            description ('str',optional): Description
+            match_values (list of str, optional): List of match fields in hierarchy
+            e.g. ['connection', 'client', 'ipv4', 'address']
+
+        Return:
+            None
+
+        Raise:
+            SubCommandFailure: Failed configuring flow record with match values
+    """
+    log.debug("Configure Flow record with match values on Device")
+    cmd = []
+    cmd.append(f"flow record {record_name}")
+    if description:
+        cmd.append(f"description {description}") 
+    if match_values:
+        if not isinstance(match_values, list):
+            raise ValueError("match_values must be a list.")
+        elif isinstance(match_values, list):
+            match_cmd = "match " + " ".join(match_values)
+            cmd.append(match_cmd) 
+    try:
+        device.configure(cmd)
+    except SubCommandFailure:
+            raise SubCommandFailure(
+               f'Could not configure flow record {record_name} with match values'
+            )
+
+def configure_flow_record_with_collect(device, record_name, description=None, collect_values=None):
+    """ Config Flow record with collect values on Device
+        Args:
+            device ('obj'): Device object
+            record_name ('str'): Flow record name
+            description ('str',optional): Description
+            collect_values (list of list or list of str, optional): Each element is a collect command token list or string.
+            Examples:
+                ["counter", "bytes", "long"]
+                ["connection", "server", "counter", "packets", "long"]
+                "flow direction"
+
+        Return:
+            None
+
+        Raise:
+            SubCommandFailure: Failed configuring flow record with collect values
+    """
+    log.debug("Configure Flow record with collect values on Device")
+    cmd = []
+    cmd.append(f"flow record {record_name}")
+    if description:
+        cmd.append(f"description {description}")
+    if not isinstance(collect_values, list):
+        raise ValueError("collect_values must be a list.")
+    elif isinstance(collect_values, list):
+        collect_cmd = "collect " + " ".join(collect_values)
+        cmd.append(collect_cmd) 
+    try:
+        device.configure(cmd)
+    except SubCommandFailure:
+            raise SubCommandFailure(
+               f'Could not configure flow record {record_name} with collect values'
+            )
+
+def unconfigure_flow_record_from_monitor(device, monitor_name, record_name):
+    """ Unconfigure Flow record from Flow Monitor
+        Args:
+            device (`obj`): Device object
+            monitor_name (`str`): Flow monitor name
+            record_name (`str`): Flow record name
+        Return:
+            None
+        Raise:
+            SubCommandFailure: Failed unconfiguring flow record
+    """
+    log.debug(f"Unconfiguring flow record {record_name} from flow monitor {monitor_name} on device {device.name}")
+    cmd = [
+        f"flow monitor {monitor_name}",
+        f"no record {record_name}",
+    ]
+        
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(f'Could not unconfigure flow record {record_name}. Error:\n{e}')
+
+def configure_stealthwatch_cloud_monitor(device, sensor_name=None, service_key=None, url=None):
+    """Configure Stealthwatch Cloud Monitor on Device
+        Args:
+            device (`obj`): Device object
+            sensor_name (`str`, optional): Sensor name
+            service_key (`str`, optional): Service key
+            url (`str`, optional): Sensor URL
+        Return:
+            None
+        Raise:
+            SubCommandFailure: Failed configuring stealthwatch cloud monitor
+    """
+    cmd = ["stealthwatch-cloud-monitor"]
+    if sensor_name:
+        cmd.append(f" sensor-name {sensor_name}")
+    if service_key:
+        cmd.append(f" service-key {service_key}")
+    if url:
+        cmd.append(f" url {url}")
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Could not configure stealthwatch cloud monitor. Error:\n{e}'
+        )
+
+def unconfigure_stealthwatch_cloud_monitor(device, sensor_name=None, service_key=None, url=None):
+    """Unconfigure Stealthwatch Cloud Monitor on Device
+        Args:
+            device (`obj`): Device object
+            sensor_name (`str`, optional): Sensor name
+            service_key (`str`, optional): Service key
+            url (`str`, optional): Sensor URL
+        Return:
+            None
+        Raise:
+            SubCommandFailure: Failed unconfiguring stealthwatch cloud monitor
+    """
+    # If no specific argument is given, remove the whole monitor
+    if not sensor_name and not service_key and not url:
+        cmd = ["no stealthwatch-cloud-monitor"]
+        try:
+            device.configure(cmd)
+        except SubCommandFailure as e:
+            raise SubCommandFailure(
+                f'Could not unconfigure stealthwatch cloud monitor. Error:\n{e}'
+            )
+        return
+
+    # Selectively remove parameters (do not send "no stealthwatch-cloud-monitor" as a prefix)
+    cmd = ["stealthwatch-cloud-monitor"]
+    if sensor_name:
+        cmd.append(f"no sensor-name {sensor_name}")
+    if service_key:
+        cmd.append(f"no service-key {service_key}")
+    if url:
+        cmd.append(f"no url {url}")
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f'Could not unconfigure stealthwatch cloud monitor parameters. Error:\n{e}'
+        )
+

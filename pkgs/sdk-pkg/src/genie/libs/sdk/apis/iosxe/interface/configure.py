@@ -4945,7 +4945,7 @@ def unconfigure_vfi(device, vlan,vpls):
             "Could not configure VFI, VLAN {vlan} with the provided parameters".format(vlan=vlan)
         )
 
-def configure_span_monitor_session(device, session_number, source_int = None, source_option = None, destination_int = None):
+def configure_span_monitor_session(device, session_number, source_int = None, source_option = None, destination_int = None, vlan_id = None):
 
      """ Configure span monitor session
          Args:
@@ -4954,6 +4954,7 @@ def configure_span_monitor_session(device, session_number, source_int = None, so
              source_int ('str', optional): source interface name to be configured, default value None
              source_option ('str', optional): name of the source option to be configured, default value None
              destination_int ('str', optional): name of the destination interface to be configured, default value None
+             vlan_id ('str', optional): vlan to be configured, default value None
          Returns:
              None
          Raises:
@@ -4962,9 +4963,10 @@ def configure_span_monitor_session(device, session_number, source_int = None, so
      configs = []
      if source_int and source_option :
          configs.append(f"monitor session {session_number}  source interface {source_int} {source_option}")
+     if vlan_id :
+         configs.append(f"monitor session {session_number}  source vlan {vlan_id}")
      if destination_int :
          configs.append(f"monitor session {session_number}  destination interface {destination_int}")
-
      try:
          device.configure(configs)
      except SubCommandFailure as e:
@@ -7404,7 +7406,10 @@ def configure_tunnel_with_ipsec(
     ipsec_profile_name=None,
     vrf=None,
     tunnel_vrf=None,
-    v6_overlay=None
+    v6_overlay=None,
+    network_id = None,
+    nhrp_redirect = False,
+    nhrp_shortcut=None
 ):
     """ Configure ipsec on Tunnel interface
         Args:
@@ -7425,6 +7430,9 @@ def configure_tunnel_with_ipsec(
             vrf ('str',optional): client vrf for  the tunnel
             tunnel_vrf ('str',optional): wan vrf for  the tunnel
             v6_overlay:('boolean', optional): True if v6-over-ipv4. Default is False
+            network_id  ('int',optional): Network Identifier
+            nhrp_redirect ('boolean',optional): Setting ip redirects. Defaults to False.
+            nhrp_shortcut ('str',optional): NHRP shortcut. Defaults to None. 
             """
     configs = []
     configs.append("interface {intf}".format(intf=tunnel_intf))
@@ -7461,6 +7469,25 @@ def configure_tunnel_with_ipsec(
                        format(tunnel_protection=tunnel_protection,profile=ipsec_profile_name))
     if v6_overlay:
         configs.append("tunnel mode ipsec {tunnel_mode} v6-overlay".format(tunnel_mode=tunnel_mode))
+    
+    if network_id is not None:
+        if overlay == 'ipv6':
+            configs.append("ipv6 nhrp network-id {network_id}".format(network_id=network_id))
+        else:
+            configs.append("ip nhrp network-id {network_id}".format(network_id=network_id))      
+    
+    if nhrp_redirect:
+        if overlay == 'ipv6':
+            configs.append("ipv6 nhrp redirect")
+        else:
+            configs.append("ip nhrp redirect")
+
+    if nhrp_shortcut is not None:
+        if overlay == 'ipv6':
+            configs.append("ipv6 nhrp shortcut {nhrp_shortcut}".format(nhrp_shortcut=nhrp_shortcut))
+        else:
+            configs.append("ip nhrp shortcut {nhrp_shortcut}".format(nhrp_shortcut=nhrp_shortcut))
+
     try:
         device.configure(configs)
     except SubCommandFailure as e:
@@ -10900,4 +10927,370 @@ def configure_fec_auto_off(device, interface, fec='auto'):
             f"Could not configure fec {fec} on {interface}. Error:\n{e}"
             )
 
+def configure_loopdetect(device, interface):
+    """ Enable loop detection on an interface   
+    Args:
+        device (`obj`): Device object
+        interface (`str`): Interface name
 
+    Returns:
+        None
+
+    Raises:
+        SubCommandFailure
+    """
+
+    try:
+        device.configure(
+            ["interface {interface}".format(interface=interface), "loopdetect"]
+        )
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            "Could not enable loop detection on interface {intf} on device {dev}. Error:\n{error}".format(
+                intf=interface, dev=device.name, error=e
+            )
+        )
+        
+def configure_pvlan_for_input_service_policy(device, interface, native_vlan, allowed_vlans, association_trunk_numbers, mapping_trunk_numbers, mode, policy_name):
+    """ Configures private VLAN settings on an input interface
+        Args:
+            device ('obj'): device to use
+            interface ('str'): interface to configure
+            native_vlan ('int'): native VLAN ID
+            allowed_vlans ('str'): allowed VLANs in the trunk
+            association_trunk_numbers ('str'): trunk numbers for private-vlan association 
+            mapping_trunk_numbers ('str'): trunk numbers for private-vlan mapping
+            mode ('str'): private VLAN mode
+            policy_name ('str'): policy-name to apply
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+
+    log.debug(f"Configuring private VLAN on input interface {interface} on device {device.name}")
+
+    cmd = [
+        f'interface {interface}',
+        f'switchport private-vlan trunk native vlan {native_vlan}',
+        f'switchport private-vlan trunk allowed vlan {allowed_vlans}',
+        f'switchport private-vlan association trunk {association_trunk_numbers}',
+        f'switchport private-vlan mapping trunk {mapping_trunk_numbers}',
+        f'switchport mode private-vlan {mode}',
+        f'service-policy input {policy_name}'
+    ]
+
+    try:
+        device.configure(cmd)
+        log.info(f"Successfully configured private VLAN for input service-policy on {interface}")
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Could not configure private VLAN for input service-policy on {interface}. Error:\n{e}")
+
+def configure_pvlan_for_output_service_policy(device, interface, allowed_vlans, primary_mapping_vlans, secondary_mapping_vlans, policy_name, queue_policy_name):
+    """ Configures private VLAN settings on an output interface
+        Args:
+            device ('obj'): device to use
+            interface ('str'): interface to configure
+            allowed_vlans ('str'): allowed VLANs in the trunk
+            primary_mapping_vlans ('str'): primary VLAN ID of the private VLAN promiscuous port mapping
+            secondary_mapping_vlans ('str'): secondary VLAN ID of the private VLAN promiscuous port mapping
+            policy_name ('str'): policy-name to apply
+            queue_policy_name ('str'): queue policy-name to apply
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    log.debug(f"Configuring private VLAN on output interface {interface} on device {device.name}")
+    cmd = [
+        f'interface {interface}',
+        f'switchport private-vlan trunk allowed vlan {allowed_vlans}',
+        f'switchport private-vlan mapping trunk {primary_mapping_vlans} {secondary_mapping_vlans}',
+        f'switchport mode private-vlan trunk promiscuous',
+        f'service-policy output {policy_name}',
+        f'service-policy type queueing output {queue_policy_name}'
+    ]
+
+    try:
+        device.configure(cmd)
+        log.info(f"Successfully configured private VLAN for output service-policy on {interface}")
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Could not configure private VLAN for output service-policy on {interface}. Error:\n{e}")
+            
+def unconfigure_loopdetect(device, interface):
+    """ Disable loop detection and bounce (shut/no shut) an interface
+    Args:
+        device (`obj`): Device object
+        interface (`str`): Interface name
+
+    Returns:
+        None
+
+    Raises:
+        SubCommandFailure
+    """
+    try:
+        device.configure(
+            [
+                "interface {interface}".format(interface=interface),
+                "no loopdetect",
+            ]
+        )
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            "Could not disable loop detection and bounce interface {interface} on device {dev}. Error:\n"
+            "{error}".format(interface=interface, dev=device.name, error=e)
+        )    
+        
+def configure_remote_span_monitor_session(device, session_number, direction_type, direction_int=None, source_option=None, vlan_id=None):        
+     """ Configure remote span monitor session
+     
+         Args:
+             device ('obj'): Device object
+             session_number ('int'): session number
+             direction_type ('str', optional): source or destination interface name to be configured
+             direction_int ('str', optional): name of the destination interface to be configured, default value None
+             source_option ('str', optional): name of the source option to be configured, default value None             
+             vlan_id ('str', optional): vlan to be configured, default value None
+         Returns:
+             None
+         Raises:
+             SubCommandFailure
+     """
+     configs = []
+     if source_option :
+         configs.append(f"monitor session {session_number} {direction_type} interface {direction_int} {source_option}")
+     elif vlan_id :
+         configs.append(f"monitor session {session_number} {direction_type} remote vlan {vlan_id}")
+     else:
+         configs.append(f"monitor session {session_number} {direction_type} interface {direction_int}")     
+     try:
+         device.configure(configs)
+     except SubCommandFailure as e:
+         raise SubCommandFailure(
+             f"Failed to configure remote span monitor session on interface:\n{e}"
+         )
+
+def unconfigure_loopdetect(device, interface):
+    """ Disable loop detection and bounce (shut/no shut) an interface
+
+    Args:
+        device (`obj`): Device object
+        interface (`str`): Interface name
+
+    Returns:
+        None
+
+    Raises:
+        SubCommandFailure
+    """
+    try:
+        device.configure(
+            [
+                "interface {interface}".format(interface=interface),
+                "no loopdetect",
+            ]
+        )
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            "Could not disable loop detection and bounce interface {interface} on device {dev}. Error:\n"
+            "{error}".format(interface=interface, dev=device.name, error=e)
+        )    
+        
+def configure_remote_span_monitor_session(device, session_number, direction_type, direction_int=None, source_option=None, vlan_id=None):        
+     """ Configure remote span monitor session
+     
+         Args:
+             device ('obj'): Device object
+             session_number ('int'): session number
+             direction_type ('str', optional): source or destination interface name to be configured
+             direction_int ('str', optional): name of the destination interface to be configured, default value None
+             source_option ('str', optional): name of the source option to be configured, default value None             
+             vlan_id ('str', optional): vlan to be configured, default value None
+         Returns:
+             None
+         Raises:
+             SubCommandFailure
+     """
+     configs = []
+     if source_option :
+         configs.append(f"monitor session {session_number} {direction_type} interface {direction_int} {source_option}")
+     elif vlan_id :
+         configs.append(f"monitor session {session_number} {direction_type} remote vlan {vlan_id}")
+     else:
+         configs.append(f"monitor session {session_number} {direction_type} interface {direction_int}")     
+     try:
+         device.configure(configs)
+     except SubCommandFailure as e:
+         raise SubCommandFailure(
+             f"Failed to configure remote span monitor session on interface:\n{e}"
+         )
+         
+def unconfigure_interface_speed_number(device, interface, speed=None):
+    """Unconfigure speed on interface with a different API name
+    Args:
+        device (`obj`): Device object
+        interface (`str`): Interface name
+        speed (`str`, optional): Speed value to remove (e.g., '10', '100', '1000'). If None, removes any speed setting.
+    Returns:
+        None
+    Raises:
+        SubCommandFailure
+    """
+    config = [
+        f'interface {interface}',
+        f'no speed {speed}'
+    ]
+    try:
+        device.configure(config)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(f"Could not unconfigure speed on {interface}. Error:\n{e}")
+    
+
+def attach_alarm_profile_to_interface(device, interface, profile_name):
+    """ Attach alarm profile to interface
+        Args:
+            device (`obj`): Device object
+            interface (`str`): Interface name
+            profile_name ('str'): Profile name to be attached
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    log.debug(
+        f"Attaching alarm profile {profile_name} to interface {interface}"
+    )
+    cmd = [f"interface {interface}", f"alarm-profile {profile_name}"]
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Could not attach alarm profile {profile_name} to {interface}. Error:\n{e}"
+        )
+    
+
+def detach_alarm_profile_from_interface(device, interface, profile_name):
+    """ Detach alarm profile from interface
+        Args:
+            device (`obj`): Device object
+            interface (`str`): Interface name
+            profile_name ('str'): Profile name to be detached
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    log.debug(
+        f"Detaching alarm profile {profile_name} from interface {interface}"
+    )
+    cmd = [f"interface {interface}", f"no alarm-profile {profile_name}"]
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Could not detach alarm profile {profile_name} from {interface}. Error:\n{e}"
+        )
+    
+def configure_dynamic_tunnel(
+                                device, 
+                                virtual_template_id, 
+                                loopback_id, 
+                                ikev2_profile,
+                                ip=None, 
+                                mask=None, 
+                                ipv6=None, 
+                                ipv6_mask=None,
+                                tunnel_source_interface="GigabitEthernet2",
+                                ipsec_profile="dmvpn-hub",
+                                overlayIpVersion='ipv4'
+                            ):
+    """
+    Configure dynamic tunnel interface with Virtual-Template and loopback interface.
+    
+    This function configures a dynamic tunnel setup using Virtual-Template interface
+    for DMVPN or similar VPN technologies with IPsec protection.
+    
+    Args:
+        device (obj): Device connection object (pyATS/unicon object) used to send commands.
+        virtual_template_id (int): Virtual-Template interface number.
+        loopback_id (int): Loopback interface number to be used as tunnel source.
+        ikev2_profile (str): IKEv2 profile name for tunnel protection.
+        ip (str, optional): Tunnel IPv4 address for loopback interface.
+        mask (str, optional): Tunnel IPv4 netmask for loopback interface.
+        ipv6 (str, optional): Tunnel IPv6 address for loopback interface.
+        ipv6_mask (str, optional): Tunnel IPv6 prefix length.
+        tunnel_source_interface (str, optional): Source interface for tunnel. Defaults to "GigabitEthernet2".
+        ipsec_profile (str, optional): IPsec profile name. Defaults to "dmvpn-hub".
+        overlayIpVersion (str, optional): Overlay IP version ('ipv4' or 'ipv6'). Defaults to 'ipv4'.
+    
+    Returns:
+        bool: True if configuration succeeded.
+    
+    Raises:
+        ValueError: If required parameters are missing for the selected IP version.
+        SubCommandFailure: If unable to configure the dynamic tunnel.
+    """
+
+    if overlayIpVersion.lower() == 'ipv4':
+        if not ip or not mask:
+            raise ValueError("IPv4 address and mask are required for IPv4 overlay")
+    elif overlayIpVersion.lower() == 'ipv6':
+        if not ipv6 or not ipv6_mask:
+            raise ValueError("IPv6 address and prefix length are required for IPv6 overlay")
+    else:
+        raise ValueError(f"Invalid overlayIpVersion: {overlayIpVersion}. Must be 'ipv4' or 'ipv6'")
+    
+    cmd = []
+
+    cmd.append(f"interface Loopback{loopback_id}")
+    if overlayIpVersion.lower() == 'ipv4':
+        cmd.append(f"ip address {ip} {mask}")
+    else:  # ipv6
+        cmd.append(f"ipv6 address {ipv6}/{ipv6_mask}")
+        cmd.append("ipv6 enable")
+
+    cmd.append(f"interface Virtual-Template{virtual_template_id} type tunnel")
+    if overlayIpVersion.lower() == 'ipv4':
+        cmd.append(f"ip unnumbered Loopback{loopback_id}")
+        cmd.append(f"tunnel mode ipsec ipv4")
+    else:
+        cmd.append(f"ipv6 unnumbered Loopback{loopback_id}")
+        cmd.append(f"tunnel mode ipsec ipv6")
+    
+    cmd.append(f"tunnel source {tunnel_source_interface}")
+    cmd.append(f"tunnel destination dynamic")
+    cmd.append(f"tunnel protection ipsec profile {ipsec_profile}")
+    cmd.append(f"crypto ikev2 profile {ikev2_profile}")
+    cmd.append(f"virtual-template {virtual_template_id}")
+    
+    try:
+        device.configure(cmd)
+        return True
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"Unable to configure dynamic tunnel. Error:\n{e}"
+        )
+
+def configure_trust_device_on_interface(device, interface, device_type):
+    """ configure trust device on the interface
+        Args:
+            device ('obj'): Device object
+            interface ('str'): interface name to configure trust device
+        Returns:
+            None
+        Raises:
+            SubCommandFailure
+    """
+    log.debug(f"configure trust device on the interface {interface}")
+    cmd = []
+    cmd.append(f"interface {interface}")
+    cmd.append(f"trust device {device_type}")
+    try:
+        device.configure(cmd)
+    except SubCommandFailure as e:
+        raise SubCommandFailure(
+            f"configure trust device on the interface {interface}. Error:\n{e}"
+        )

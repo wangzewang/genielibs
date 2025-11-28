@@ -10,15 +10,19 @@ import time
 import os.path
 import logging
 from textwrap import dedent
+import hashlib
 from ipaddress import IPv4Address, IPv6Address, IPv4Interface, IPv6Interface
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures, ALL_COMPLETED
 
 # pyATS
 from pyats.async_ import pcall
 from pyats.utils.fileutils import FileUtils
+from pyats.log.utils import banner
 
 # Genie
 from genie.abstract import Lookup
 from genie.libs import clean
+from genie.libs.clean.utils import get_protected_files
 from genie.libs.clean.recovery.recovery import _disconnect_reconnect
 from genie.utils import Dq
 from genie.utils.config import Config
@@ -37,11 +41,11 @@ from genie.libs.clean.utils import (
 from unicon.eal.dialogs import Statement, Dialog
 from unicon.core.errors import SubCommandFailure
 from unicon.plugins.generic.statements import GenericStatements
+from unicon.plugins.iosxe.statements import grub_prompt_handler
 from unicon.core.errors import UniconAuthenticationError, UniconBackendDecodeError, CredentialsExhaustedError
 
 # Logger
 log = logging.getLogger(__name__)
-
 
 class ChangeBootVariable(BaseStage):
     """This stage configures boot variables of the device using the following steps:
@@ -110,16 +114,14 @@ class ChangeBootVariable(BaseStage):
     ]
 
     def delete_boot_variable(self, steps, device):
-        with steps.start(
-            "Delete any configured boot variables on {}".format(device.name)
-        ) as step:
+        with steps.start("Delete any configured boot variables on {}".format(
+                device.name)) as step:
 
             try:
                 device.configure("no boot system")
             except Exception as e:
-                step.failed(
-                    "Failed to delete configured boot variables", from_exception=e
-                )
+                step.failed("Failed to delete configured boot variables",
+                            from_exception=e)
             else:
                 step.passed("Successfully deleted configured boot variables")
 
@@ -132,19 +134,18 @@ class ChangeBootVariable(BaseStage):
         current_running_image=CURRENT_RUNNING_IMAGE,
     ):
 
-        with steps.start(
-            "Set boot variable to images provided for {}".format(device.name)
-        ) as step:
+        with steps.start("Set boot variable to images provided for {}".format(
+                device.name)) as step:
 
             if current_running_image:
-                log.info(
-                    "Retrieving and using the running image due to "
-                    "'current_running_image: True'"
-                )
+                log.info("Retrieving and using the running image due to "
+                         "'current_running_image: True'")
 
                 try:
                     output = device.parse("show version")
-                    images = self.running_images = [output["version"]["system_image"]]
+                    images = self.running_images = [
+                        output["version"]["system_image"]
+                    ]
                 except Exception as e:
                     step.failed(
                         "Failed to retrieve the running image. Cannot "
@@ -153,52 +154,54 @@ class ChangeBootVariable(BaseStage):
                     )
 
             try:
-                device.api.execute_set_boot_variable(
-                    boot_images=images, timeout=timeout
-                )
+                device.api.execute_set_boot_variable(boot_images=images,
+                                                     timeout=timeout)
             except Exception as e:
-                step.failed(
-                    "Failed to set boot variables to images provided", from_exception=e
-                )
+                step.failed("Failed to set boot variables to images provided",
+                            from_exception=e)
             else:
-                step.passed("Successfully set boot variables to images provided")
+                step.passed(
+                    "Successfully set boot variables to images provided")
 
-    def set_configuration_register(
-        self, steps, device, config_register=CONFIG_REGISTER, timeout=TIMEOUT
-    ):
-        with steps.start(
-            "Set config register to boot new image on {}".format(device.name)
-        ) as step:
+    def set_configuration_register(self,
+                                   steps,
+                                   device,
+                                   config_register=CONFIG_REGISTER,
+                                   timeout=TIMEOUT):
+        with steps.start("Set config register to boot new image on {}".format(
+                device.name)) as step:
 
             try:
                 device.api.execute_set_config_register(
-                    config_register=config_register, timeout=timeout
-                )
+                    config_register=config_register, timeout=timeout)
             except Exception as e:
                 step.failed("Failed to set config-register", from_exception=e)
             else:
                 step.passed("Successfully set config register")
 
     def write_memory(self, steps, device, timeout=TIMEOUT):
-        with steps.start("Execute 'write memory' on {}".format(device.name)) as step:
+        with steps.start("Execute 'write memory' on {}".format(
+                device.name)) as step:
             try:
                 device.api.execute_write_memory(timeout=timeout)
             except Exception as e:
-                step.failed("Failed to execute 'write memory'", from_exception=e)
+                step.failed("Failed to execute 'write memory'",
+                            from_exception=e)
             else:
                 step.passed("Successfully executed 'write memory'")
 
-    def verify_boot_variable(
-        self, steps, device, images, current_running_image=CURRENT_RUNNING_IMAGE
-    ):
-        with steps.start(
-            "Verify next reload boot variables are correctly set "
-            "on {}".format(device.name)
-        ) as step:
+    def verify_boot_variable(self,
+                             steps,
+                             device,
+                             images,
+                             current_running_image=CURRENT_RUNNING_IMAGE):
+        with steps.start("Verify next reload boot variables are correctly set "
+                         "on {}".format(device.name)) as step:
 
             if current_running_image:
-                log.info("Verifying next reload boot variables Using the running image due to "
-                         "'current_running_image: True'")
+                log.info(
+                    "Verifying next reload boot variables Using the running image due to "
+                    "'current_running_image: True'")
                 images = self.running_images
 
             if not device.api.verify_boot_variable(boot_images=images):
@@ -206,16 +209,15 @@ class ChangeBootVariable(BaseStage):
             else:
                 step.passed("Boot variables are correctly set")
 
-    def verify_configuration_register(
-        self, steps, device, config_register=CONFIG_REGISTER
-    ):
-        with steps.start(
-            "Verify config-register is as expected on {}".format(device.name)
-        ) as step:
+    def verify_configuration_register(self,
+                                      steps,
+                                      device,
+                                      config_register=CONFIG_REGISTER):
+        with steps.start("Verify config-register is as expected on {}".format(
+                device.name)) as step:
 
             if not device.api.verify_config_register(
-                config_register=config_register, next_reload=True
-            ):
+                    config_register=config_register, next_reload=True):
                 step.failed("Config-register is not as expected")
             else:
                 step.passed("Config-register is as expected")
@@ -329,18 +331,20 @@ class TftpBoot(BaseStage):
         "write_memory",
     ]
 
-    def check_image_length(self, steps, image, image_length_limit=IMAGE_LENGTH_LIMIT):
+    def check_image_length(self,
+                           steps,
+                           image,
+                           image_length_limit=IMAGE_LENGTH_LIMIT):
         log.warning(
             "The next release will REMOVE the following keys from the tftp_boot schema:\n"
             "recovery_password, recovery_username, recovery_en_password, ether_port, save_system_config\n"
-            "Please update the clean YAML file accordingly."
-        )
-        with steps.start("Check the length of image: {}".format(image[0])) as step:
+            "Please update the clean YAML file accordingly.")
+        with steps.start("Check the length of image: {}".format(
+                image[0])) as step:
             if len(image[0]) > image_length_limit:
                 step.failed(
                     f"The length of image path {image[0]} is more than the limit of"
-                    f" {image_length_limit} characters."
-                )
+                    f" {image_length_limit} characters.")
             else:
                 step.passed(
                     f"The length of image {image[0]} is within the {image_length_limit} character limit."
@@ -353,56 +357,54 @@ class TftpBoot(BaseStage):
         config_reg_rommon=CONFIG_REG_ROMMON,
         config_reg_timeout=CONFIG_REG_TIMEOUT,
     ):
-        with steps.start(
-            "Set config-register to 0x0 on {}".format(device.name)
-        ) as step:
+        with steps.start("Set config-register to 0x0 on {}".format(
+                device.name)) as step:
             try:
                 device.api.execute_set_config_register(
-                    config_register=config_reg_rommon, timeout=config_reg_timeout
-                )
+                    config_register=config_reg_rommon,
+                    timeout=config_reg_timeout)
             except Exception as e:
                 step.failed(
                     "Unable to set config-register to 0x0 prior to TFTP"
-                    " boot on {}".format(device.name),
-                )
+                    " boot on {}".format(device.name), )
 
-    def go_to_rommon(self, steps, device, save_system_config=SAVE_SYSTEM_CONFIG):
+    def go_to_rommon(self,
+                     steps,
+                     device,
+                     save_system_config=SAVE_SYSTEM_CONFIG):
         with steps.start(
-            "Bring device {} down to rommon> prompt prior to TFTP boot".format(
-                device.name
-            )
-        ) as step:
+                "Bring device {} down to rommon> prompt prior to TFTP boot".
+                format(device.name)) as step:
 
-            reload_dialog = Dialog(
-                [
-                    Statement(
-                        pattern=r".*System configuration has been modified\. Save\? \[yes\/no\].*",
-                        action=(
-                            "sendline(yes)" if save_system_config else "sendline(no)"
-                        ),
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*Proceed with reload\? \[confirm\].*",
-                        action="sendline()",
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*Continue to reload\? \(yes\/\[no\]\)\:.*",
-                        action="sendline(yes)",
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*(Proceed|Continue) (with|to) reload\? (\[confirm\]|\(yes\/\[no\]\)\:).*",
-                        action="sendline()",
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                ]
-            )
+            reload_dialog = Dialog([
+                Statement(
+                    pattern=
+                    r".*System configuration has been modified\. Save\? \[yes\/no\].*",
+                    action=("sendline(yes)"
+                            if save_system_config else "sendline(no)"),
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Proceed with reload\? \[confirm\].*",
+                    action="sendline()",
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Continue to reload\? \(yes\/\[no\]\)\:.*",
+                    action="sendline(yes)",
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=
+                    r".*(Proceed|Continue) (with|to) reload\? (\[confirm\]|\(yes\/\[no\]\)\:).*",
+                    action="sendline()",
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+            ])
 
             # Using sendline, as we dont want unicon boot to kick in and send "boot"
             # to the device. Cannot use device.reload() directly as in case of HA,
@@ -425,20 +427,27 @@ class TftpBoot(BaseStage):
                 if len(device.subconnections) > 2:
                     pcall(
                         reload_check,
-                        cargs=(device,),
-                        iargs=[
-                            [alias] for alias in device.connections.defaults.connections
-                        ],
+                        cargs=(device, ),
+                        iargs=[[
+                            alias
+                        ] for alias in device.connections.defaults.connections
+                               ],
                     )
                 else:
                     pcall(
                         reload_check,
                         ckwargs={"device": device},
-                        ikwargs=[{"target": "active"}, {"target": "standby"}],
+                        ikwargs=[{
+                            "target": "active"
+                        }, {
+                            "target": "standby"
+                        }],
                     )
             else:
                 device.expect(
-                    ["(.*Initializing Hardware.*|^(.*)((rommon(.*))+>|switch *:).*$)"],
+                    [
+                        "(.*Initializing Hardware.*|^(.*)((rommon(.*))+>|switch *:).*$)"
+                    ],
                     timeout=60,
                 )
 
@@ -460,7 +469,8 @@ class TftpBoot(BaseStage):
         recovery_en_password=RECOVERY_EN_PASSWORD,
         ether_port=ETHER_PORT,
     ):
-        with steps.start("Begin TFTP boot of device {}".format(device.name)) as step:
+        with steps.start("Begin TFTP boot of device {}".format(
+                device.name)) as step:
 
             # Need to instantiate to get the device.start
             # The device.start only works because of a|b
@@ -488,7 +498,9 @@ class TftpBoot(BaseStage):
                 result = pcall(
                     abstract.recovery.recovery.recovery_worker,
                     start=start,
-                    ikwargs=[{"item": i} for i, _ in enumerate(start)],
+                    ikwargs=[{
+                        "item": i
+                    } for i, _ in enumerate(start)],
                     ckwargs={
                         "device": device,
                         "timeout": timeout,
@@ -506,38 +518,29 @@ class TftpBoot(BaseStage):
             except Exception as e:
                 log.error(str(e))
                 step.failed(
-                    "Failed to TFTP boot the device '{}'".format(device.name),
-                )
+                    "Failed to TFTP boot the device '{}'".format(
+                        device.name), )
             else:
                 log.info(
                     "Successfully performed TFTP boot on device '{}'".format(
-                        device.name
-                    )
-                )
+                        device.name))
 
     def reconnect(self, steps, device):
-        with steps.start(
-            "Reconnect to device {} after TFTP boot".format(device.name)
-        ) as step:
-            if (
-                getattr(device, "chassis_type", None)
-                and device.chassis_type.lower() == "stack"
-            ):
+        with steps.start("Reconnect to device {} after TFTP boot".format(
+                device.name)) as step:
+            if (getattr(device, "chassis_type", None)
+                    and device.chassis_type.lower() == "stack"):
                 log.info("Sleep for 90 seconds in order to sync ")
                 time.sleep(90)
             if not _disconnect_reconnect(device):
                 # If that still doesnt work, Thats all we got
                 step.failed(
-                    "Cannot reconnect to the device {d} after TFTP boot".format(
-                        d=device.name
-                    ),
-                )
+                    "Cannot reconnect to the device {d} after TFTP boot".
+                    format(d=device.name), )
             else:
                 log.info(
-                    "Success - Have recovered and reconnected to device '{}'".format(
-                        device.name
-                    )
-                )
+                    "Success - Have recovered and reconnected to device '{}'".
+                    format(device.name))
 
     def reset_config_register(
         self,
@@ -546,34 +549,32 @@ class TftpBoot(BaseStage):
         config_reg_timeout=CONFIG_REG_TIMEOUT,
         config_reg_normal=CONFIG_REG_NORMAL,
     ):
-        with steps.start(
-            "Reset config-register to 0x2101 on {}".format(device.name)
-        ) as step:
+        with steps.start("Reset config-register to 0x2101 on {}".format(
+                device.name)) as step:
             try:
                 device.api.execute_set_config_register(
-                    config_register=config_reg_normal, timeout=config_reg_timeout
-                )
+                    config_register=config_reg_normal,
+                    timeout=config_reg_timeout)
             except Exception as e:
                 log.error(str(e))
                 step.failed(
                     "Unable to reset config-register to 0x2101 after TFTP"
-                    " boot on {}".format(device.name),
-                )
+                    " boot on {}".format(device.name), )
 
     def write_memory(self, steps, device):
-        with steps.start("Execute 'write memory' on {}".format(device.name)) as step:
+        with steps.start("Execute 'write memory' on {}".format(
+                device.name)) as step:
             try:
                 device.api.execute_write_memory()
             except Exception as e:
                 log.error(str(e))
                 step.failed(
                     "Unable to execute 'write memory' after TFTP boot "
-                    "on {}".format(device.name),
-                )
+                    "on {}".format(device.name), )
             else:
                 step.passed(
-                    "Successfully performed TFTP boot on device {}".format(device.name)
-                )
+                    "Successfully performed TFTP boot on device {}".format(
+                        device.name))
 
 
 class InstallRemoveInactive(BaseStage):
@@ -623,16 +624,22 @@ class InstallRemoveInactive(BaseStage):
     def __call__(self, **parameters):
         images = parameters.get('images')
         if not images:
-            self.skipped('Base image not provided. Skipping install remove inactive')
+            self.skipped(
+                'Base image not provided. Skipping install remove inactive')
             return
         super().__call__(**parameters)
 
-    def remove_inactive_pkgs(
-        self, steps, device, images, timeout=TIMEOUT, force_remove=FORCE_REMOVE
-    ):
+    def remove_inactive_pkgs(self,
+                             steps,
+                             device,
+                             images,
+                             timeout=TIMEOUT,
+                             force_remove=FORCE_REMOVE):
         with steps.start("Removing inactive packages") as step:
 
-            def _check_for_system_image(spawn, system_image=None, force_remove=None):
+            def _check_for_system_image(spawn,
+                                        system_image=None,
+                                        force_remove=None):
                 if force_remove is True:
                     log.warning(
                         f"Sending yes to delete files without checking {system_image} in among the files to be deleted."
@@ -640,7 +647,8 @@ class InstallRemoveInactive(BaseStage):
                     spawn.sendline("y")
                     return
 
-                if system_image and re.search(f"{system_image}\r", spawn.buffer):
+                if system_image and re.search(f"{system_image}\r",
+                                              spawn.buffer):
                     log.debug(
                         f"{system_image} is among the files to be deleted. send no so the {system_image} is not deleted. "
                     )
@@ -654,17 +662,20 @@ class InstallRemoveInactive(BaseStage):
             # split the image on the [:/] and pick up the image name
             image = re.split(r"[:/]", images[0])[-1]
 
-            install_remove_inactive_dialog = Dialog(
-                [
-                    Statement(
-                        pattern=r".*Do you want to remove the above files\? \[y\/n\]",
-                        action=_check_for_system_image,
-                        args={"system_image": image, "force_remove": force_remove},
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                ]
-            )
+            generic_statements = GenericStatements()
+            install_remove_inactive_dialog = Dialog([
+                Statement(
+                    pattern=
+                    r".*Do you want to remove the above files\? \[y\/n\]",
+                    action=_check_for_system_image,
+                    args={
+                        "system_image": image,
+                        "force_remove": force_remove
+                    },
+                    loop_continue=True,
+                    continue_timer=False,
+                ), generic_statements.syslog_msg_stmt
+            ])
 
             try:
                 device.execute(
@@ -673,7 +684,8 @@ class InstallRemoveInactive(BaseStage):
                     timeout=timeout,
                 )
             except Exception as e:
-                step.failed("Failed to remove inactive packages", from_exception=e)
+                step.failed("Failed to remove inactive packages",
+                            from_exception=e)
 
 
 class InstallImage(BaseStage):
@@ -705,8 +717,11 @@ class InstallImage(BaseStage):
             image version on device. If a match is found, the stage will be skipped.
             Defaults to True.
 
+        install_retry_attempts (int, optional): Number of times to retry install.
+            Defaults to 2.
+
         reload_wait (int, optional): The maximum time allowed, in seconds,
-            to check the auto reload. Defaults to 30.
+            to check the auto reload. Defaults to 150.
 
         reload_service_args (optional):
 
@@ -751,26 +766,37 @@ class InstallImage(BaseStage):
     SKIP_BOOT_VARIABLE = False
     SKIP_SAVE_RUNNING_CONFIG = False
     VERIFY_RUNNING_IMAGE = True
-    RELOAD_WAIT = 30
+    RELOAD_WAIT = 150
+    INSTALL_RETRY_ATTEMPTS = 2
 
     # ============
     # Stage Schema
     # ============
     schema = {
-        Optional("images"): list,
-        Optional("directory"): str,
-        Optional("save_system_config"): bool,
-        Optional("install_timeout"): int,
-        Optional("reload_timeout"): int,
-        Optional("reload_wait"): int,
-        Optional("issu"): bool,
-        Optional("skip_boot_variable"): bool,
-        Optional("skip_save_running_config"): bool,
+        Optional("images"):
+        list,
+        Optional("directory"):
+        str,
+        Optional("save_system_config"):
+        bool,
+        Optional("install_timeout"):
+        int,
+        Optional("reload_timeout"):
+        int,
+        Optional("reload_wait"):
+        int,
+        Optional("issu"):
+        bool,
+        Optional("skip_boot_variable"):
+        bool,
+        Optional("skip_save_running_config"):
+        bool,
         Optional(
             "verify_running_image",
             description="Compare the image filename with the running image version on device. If a match is found, the stage will be skipped",
             default=VERIFY_RUNNING_IMAGE,
-        ): bool,
+        ):
+        bool,
         Optional("reload_service_args"): {
             Optional("reload_creds"): str,
             Optional("prompt_recovery"): bool,
@@ -783,24 +809,29 @@ class InstallImage(BaseStage):
     # Execution order of Stage steps
     # ==============================
     exec_order = [
-        "verify_running_image",
+        "configure_no_boot_manual",
         "delete_boot_variable",
         "set_boot_variable",
+        "configure_and_verify_startup_config",
         "save_running_config",
         "verify_boot_variable",
-        "install_image",
+        "verify_running_image",
+        "install_image"
     ]
 
     def __call__(self, **parameters):
         images = parameters.get('images')
         if not images:
-            self.skipped('Base image not provided. Skipping the install image stage.')
+            self.skipped(
+                'Base image not provided. Skipping the install image stage.')
             return
         super().__call__(**parameters)
 
-    def verify_running_image(
-        self, steps, device, images, verify_running_image=VERIFY_RUNNING_IMAGE
-    ):
+    def verify_running_image(self,
+                             steps,
+                             device,
+                             images,
+                             verify_running_image=VERIFY_RUNNING_IMAGE):
         # Check the running image
         if verify_running_image:
             # Verify the image running in the device
@@ -811,7 +842,8 @@ class InstallImage(BaseStage):
                     step.failed("Failed to verify the running image")
 
                 # if the device is in bundle mode this step will not be executed.
-                modes = Dq(out).get_values("mode") or Dq(out).get_values("installation_mode")
+                modes = Dq(out).get_values("mode") or Dq(out).get_values(
+                    "installation_mode")
                 if modes and "BUNDLE" in modes:
                     step.skipped(
                         f"The device is in bundle mode. Skipping the verify running image check."
@@ -821,34 +853,24 @@ class InstallImage(BaseStage):
                     # If neither is found, fail to match the image
                     xe_version = out.get("version", {}).get("xe_version", "")
                     build_label = out.get("version", {}).get("build_label", "")
-                    image_version = xe_version or build_label
+                    image_version = xe_version if len(
+                        xe_version) > 3 else build_label
                     image_match = re.search(image_version, images[0])
                     if image_match and image_match.group():
                         image_mapping = self.history[
-                            "InstallImage"
-                        ].parameters.setdefault("image_mapping", {})
+                            "InstallImage"].parameters.setdefault(
+                                "image_mapping", {})
                         system_image = device.api.get_running_image()
                         image_mapping.update({images[0]: system_image})
+                        self.skipped(
+                            f"The image file provided is same as the current running image {image_version} on the device.\n"
+                            "Skipping the install image stage.")
 
-                        log.info(f'Unconfigure the ignore startup config on {device.name}')
-                        try:
-                            device.api.unconfigure_ignore_startup_config()
-                        except Exception as e:
-                            step.passx(f"Failed to unconfigure ignore startup config on the device {device.name}",
-                                from_exception=e)
-
-                        log.info(f'Verify the ignore startup config')
-                        if not device.api.verify_ignore_startup_config():
-                            step.failed(f"Failed to verify unconfigure the ignore startup config on {device.name}")
-                        else:
-                            self.skipped(
-                                f"The image file provided is same as the current running image {image_version} on the device.\n"
-                                "Skipping the install image stage."
-                            )
-
-    def delete_boot_variable(
-        self, steps, device, issu=ISSU, skip_boot_variable=SKIP_BOOT_VARIABLE
-    ):
+    def delete_boot_variable(self,
+                             steps,
+                             device,
+                             issu=ISSU,
+                             skip_boot_variable=SKIP_BOOT_VARIABLE):
         with steps.start("Delete all boot variables") as step:
             if issu or skip_boot_variable:
                 step.skipped()
@@ -856,9 +878,8 @@ class InstallImage(BaseStage):
                 try:
                     device.configure("no boot system")
                 except Exception as e:
-                    step.failed(
-                        "Failed to delete configured boot variables", from_exception=e
-                    )
+                    step.failed("Failed to delete configured boot variables",
+                                from_exception=e)
 
     def set_boot_variable(
         self,
@@ -868,7 +889,8 @@ class InstallImage(BaseStage):
         issu=ISSU,
         skip_boot_variable=SKIP_BOOT_VARIABLE,
     ):
-        with steps.start("Configure system boot variable for 'install mode'") as step:
+        with steps.start(
+                "Configure system boot variable for 'install mode'") as step:
             if issu or skip_boot_variable:
                 step.skipped()
             else:
@@ -879,11 +901,13 @@ class InstallImage(BaseStage):
                     output = device.parse("dir")
                 else:
                     output = device.parse(f"dir {directory}")
-                files = output.get("dir", {}).get(directory, {}).get("files", {})
+                files = output.get("dir", {}).get(directory,
+                                                  {}).get("files", {})
 
                 if not files.get("packages.conf"):
                     # create packages.conf, if it does not exist
-                    device.tclsh('puts [open "%spackages.conf" w+] {}' % directory)
+                    device.tclsh('puts [open "%spackages.conf" w+] {}' %
+                                 directory)
 
                 # packages.conf is hardcoded because install mode boots using an
                 # unpacked packages.conf file
@@ -891,46 +915,88 @@ class InstallImage(BaseStage):
 
                 try:
                     device.api.execute_set_boot_variable(
-                        boot_images=[self.new_boot_var], timeout=60
-                    )
+                        boot_images=[self.new_boot_var], timeout=60)
                 except Exception as e:
-                    step.failed(
-                        "Failed to configure the boot variable", from_exception=e
-                    )
+                    step.failed("Failed to configure the boot variable",
+                                from_exception=e)
 
-                log.info(f'Unconfigure the ignore startup config on {device.name}')
+                log.info(
+                    f'Unconfigure the ignore startup config on {device.name}')
                 try:
                     device.api.unconfigure_ignore_startup_config()
                 except Exception as e:
-                    step.passx(f"Unable to unconfigure ignore startup config on the device {device.name}")
+                    step.passx(
+                        f"Unable to unconfigure ignore startup config on the device {device.name}"
+                    )
 
-    def save_running_config(self, steps, device, skip_save_running_config=SKIP_SAVE_RUNNING_CONFIG):
-        with steps.start("Save the running config to the startup config") as step:
+    def configure_and_verify_startup_config(self, steps, device):
+        with steps.start("Unconfigure ignore startup config") as step:
+            try:
+                # Attempt to unconfigure the ignore startup config
+                device.api.unconfigure_ignore_startup_config()
+            except Exception as e:
+                step.passx(
+                    f"Failed to unconfigure ignore startup config on the device {device.name}",
+                    from_exception=e)
+
+        with steps.start("Verify ignore startup config") as step:
+            try:
+                # Attempt to verify the ignore startup config
+                if not device.api.verify_ignore_startup_config():
+                    step.passx(
+                        f"Failed to verify unconfigure of the ignore startup config on {device.name}"
+                    )
+            except Exception as e:
+                step.passx(
+                    f"An error occurred while verifying the ignore startup config on {device.name}",
+                    from_exception=e)
+
+    def save_running_config(self,
+                            steps,
+                            device,
+                            skip_save_running_config=SKIP_SAVE_RUNNING_CONFIG):
+        with steps.start(
+                "Save the running config to the startup config") as step:
             if skip_save_running_config:
                 step.skipped()
                 return
             try:
-                device.api.execute_copy_run_to_start(max_time=60, check_interval=30)
+                output = device.api.execute_copy_run_to_start(max_time=60,
+                                                     check_interval=30)
+                if output:
+                    step.passed("Save running config has passed")
+                else:
+                    step.failed("Save running config has failed")
+
             except Exception as e:
-                step.failed("Failed to save the running config", from_exception=e)
+                step.failed("Failed to save the running config",
+                            from_exception=e)
 
-
-    def verify_boot_variable(self, steps, device, issu=ISSU, skip_boot_variable=SKIP_BOOT_VARIABLE):
+    def verify_boot_variable(self,
+                             steps,
+                             device,
+                             issu=ISSU,
+                             skip_boot_variable=SKIP_BOOT_VARIABLE):
         # Verify next reload boot variables are correctly set
-        with steps.start("Verify next reload boot variables are correctly set") as step:
+        with steps.start(
+                "Verify next reload boot variables are correctly set") as step:
             if issu or skip_boot_variable:
                 step.skipped()
             else:
-                if not device.api.verify_boot_variable(boot_images=[self.new_boot_var]):
+                if not device.api.verify_boot_variable(
+                        boot_images=[self.new_boot_var]):
                     step.failed(f"Boot variables are not correctly set to "
                                 f"{self.new_boot_var}")
             log.info('verify the ignore startup config')
             try:
                 if not device.api.verify_ignore_startup_config():
-                    step.failed(f"Failed to verify unconfigure the ignore startup config on {device.name}")
+                    step.failed(
+                        f"Failed to verify unconfigure the ignore startup config on {device.name}"
+                    )
             except Exception as e:
-                step.passx(f"Unable to verify unconfigure the ignore startup config on {device.name}")
-            
+                step.passx(
+                    f"Unable to verify unconfigure the ignore startup config on {device.name}"
+                )
 
     def install_image(
         self,
@@ -942,6 +1008,7 @@ class InstallImage(BaseStage):
         reload_service_args=None,
         issu=ISSU,
         reload_wait=RELOAD_WAIT,
+        install_retry_attempts=INSTALL_RETRY_ATTEMPTS,
     ):
 
         # Set default reload args
@@ -953,114 +1020,301 @@ class InstallImage(BaseStage):
         if reload_service_args:
             reload_args.update(reload_service_args)
 
+        with steps.start("Check for previous uncommitted install operation") as step:
+            try:
+                output = device.parse("show install active")
+                if not output.get("location"):
+                    step.skipped("No active packages found to commit.")
+                location = list(output.get("location").keys())
+                for each in location:
+                    for pkg in output.get("location").get(each).get("pkg_state"):
+                        file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                        # Image is activated & uncommitted state
+                        if file_state == "U":
+                            output = device.execute("install commit")
+                            if "SUCCESS:" in output:
+                                log.info("The image is activated and committed")
+                            break
+            except Exception as e:
+                step.failed("Failed to execute install commit",
+                            from_exception=e)
+
         with steps.start(f"Installing image '{images[0]}'") as step:
             current_image = device.api.get_running_image()
             if current_image == images[0]:
                 step.skipped("Images is already installed on the device.")
+                
+            not_enough_space_pattern =  r".*FAILED: /(flash|bootflash) requires (\d+) KB of free space.*"
+            
+            def _check_disk_space(spawn, context, session):
+                """Match the required space from the error message and set the flag to clean up space"""
+                match = re.search(not_enough_space_pattern, spawn.buffer, re.DOTALL)
+                if match:
+                    spawn.device.space_required = int(match.group(2))
+                    device.clean_space = True
 
-            install_add_one_shot_dialog = Dialog(
-                [
-                    Statement(
-                        pattern=r".*Press Quit\(q\) to exit, you may save "
-                        r"configuration and re-enter the command\. "
-                        r"\[y\/n\/q\]",
-                        action="sendline(y)" if save_system_config else "sendline(n)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*Please confirm you have changed boot config "
-                        r"to \S+ \[y\/n\]",
-                        action="sendline(y)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*Same Image File-No Change",
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r".*reload of the system\. "
-                        r"Do you want to proceed\? \[y\/n\]",
-                        action="sendline(y)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"FAILED:.*?$",
-                        action=None,
-                        loop_continue=False,
-                        continue_timer=False,
-                    ),
-                ]
-            )
+            def handle_issu_dialog(spawn, context):
+                """Handle ISSU in progress dialog by aborting the operation"""
 
-            try:
-                reload_args.update(
-                    {"timeout": install_timeout, "reply": install_add_one_shot_dialog}
-                )
+                # copy running-config startup-config
+                device.api.execute_copy_run_to_start()
 
-                check_reload_dialog = Dialog(
-                            [
-                                Statement(
-                                    pattern=r".*Initializing Hardware",
-                                    action=None,
-                                    loop_continue=False,
-                                    continue_timer=False,
-                                ),
-                                 Statement(
-                                    pattern=r".*Chassis [1|2] reloading, reason - Reload command",
-                                    action=None,
-                                    loop_continue=False,
-                                    continue_timer=False,
-                                ),
-                                Statement(
-                                    pattern=r".*Rebooting\/Shutting Down like normal.*",
-                                    action=None,
-                                    loop_continue=False,
-                                    continue_timer=False,
-                                )
-                            ]
-                        )
+                # Execute install abort issu
+                log.warning("ISSU is in progress. Aborting the ISSU upgrade to proceed.")
+                output = device.execute("install abort issu", timeout=30)
 
-                if issu:
-                    install_cmd = "install add file {} activate issu commit prompt-level none"
-                install_cmd = "install add file {} activate commit prompt-level none"
+                # Check if the failure is due to "Nothing to Abort"
+                if "Nothing to Abort" in str(output) or "FAILED" in str(output):
+                    log.info("No ISSU operation to abort, Need to clean install state")
 
-                device.execute(install_cmd.format(images[0]),
-                                reply=install_add_one_shot_dialog,
-                                error_pattern=["FAILED:"],
-                                timeout=install_timeout,
-                )
-                # Usually the device does auto reload after install operation
-                # This logic is to handle if the device did not reload
+                # Execute show issu detail to check current state
+                device.execute("show issu state detail", timeout=30)
+
+                # Configure service internal and clear install state
                 try:
-                    # dialog processor to identify reload patterns
-                    # upon detection of such a pattern, we perform reload and
-                    # update the timeout, which is managed in the subsequent steps
-                    log.debug("Check if the device reloaded after installing the image")
-                    check_reload_dialog.process(device.spawn, timeout=reload_wait)
-                except TimeoutError:
-                    # We deliberately trigger a timeout error under the assumption that the
-                    # device did not auto reload.
-                    device.execute("show version")
-                    device.execute("show install summary")
-                    device.reload(**reload_args)
-                else:
-                    device.reload(
-                        "", **reload_args
-                    )
-                device.execute("install commit")
+                    device.configure("service internal")
+                    log.info("Successfully configured service internal")
+                    device.api.execute_clear_install_state()
+                    log.info("Successfully cleared install state")
+                except Exception as e:
+                    log.warning(f"Failed to configure service internal or clear install state: {e}")
 
-            except Exception as e:
-                step.failed("Failed to install the image", from_exception=e)
+                # Raise exception to indicate ISSU is in progress
+                setattr(device, 'issu_in_progress', True)
+                raise Exception("ISSU operation detected - device marked as in progress")
+
+            def install_image_failing(device, step, context):
+                """
+                Handle install image failure by collecting install logs and
+                failing the step.
+                """
+                exception = context.get('exception')
+                try:
+                    device.api.collect_install_log()
+                except Exception as log_exc:
+                    log.error("Exception during collect_install_log: %s", log_exc, exc_info=True)
+                    step.failed("Failed to install the image (and collect_install_log also failed)", from_exception=exception)
+                else:
+                    step.failed("Failed to install the image", from_exception=exception)
+
+            install_add_one_shot_dialog = Dialog([
+                Statement(
+                    pattern=r".*Press Quit\(q\) to exit, you may save "
+                    r"configuration and re-enter the command\. "
+                    r"\[y\/n\/q\]",
+                    action="sendline(y)"
+                    if save_system_config else "sendline(n)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Please confirm you have changed boot config "
+                    r"to \S+ \[y\/n\]",
+                    action="sendline(y)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Same Image File-No Change",
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*reload of the system\. "
+                    r"Do you want to proceed\? \[y\/n\]",
+                    action="sendline(y)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                # Add handler for ISSU dialog
+                Statement(
+                    pattern=r".*Install ISSU in progress\. Abort the ISSU upgrade to proceed.*",
+                    action=handle_issu_dialog,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                # Add statement for not enough space
+                Statement(
+                    pattern=not_enough_space_pattern,
+                    action=_check_disk_space,
+                    loop_continue=False,
+                    continue_timer=False,
+                    trim_buffer=False,
+                ),
+                Statement(
+                    pattern=r".*FAILED: install_add_activate_commit",
+                    action=install_image_failing,
+                    args={'device': device, 'step': step},
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*FAILED: Install Operation failed as one or more package file\(s\) for running image is not present in the device",
+                    action=install_image_failing,
+                    args={'device': device, 'step': step},
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+            ])
+
+
+            reload_args.update({
+                "timeout": install_timeout,
+                "reply": install_add_one_shot_dialog
+            })
+
+            check_reload_dialog = Dialog([
+                Statement(
+                    pattern=r".*reboot: Restarting system",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Initializing Hardware",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*reload action requested",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=
+                    r".*Chassis [1|2] reloading, reason - Reload command",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Rebooting\/Shutting Down like normal.*",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r".*Press RETURN to get started!*",
+                    action="sendline('')",
+                    loop_continue=False,
+                    continue_timer=False,
+                ),
+            ])
+
+            install_cmd = "install add file {} activate commit prompt-level none"
+            if issu:
+                install_cmd = "install add file {} activate issu commit prompt-level none"
+
+            retry_count = 0
+            while retry_count < install_retry_attempts:
+                try:
+                    device.execute(
+                        install_cmd.format(images[0]),
+                        reply=install_add_one_shot_dialog,
+                        error_pattern=["FAILED:"],
+                        timeout=install_timeout,
+                    )
+                    break  # Success, exit the retry loop
+                except Exception as e:
+                    device.api.collect_install_log()
+                    if getattr(device, 'issu_in_progress', None):
+                        retry_count += 1
+                        if retry_count < install_retry_attempts:
+                            log.warning(f"ISSU in progress detected, retrying ({retry_count}/{install_retry_attempts})")
+                            # Remove the flag
+                            delattr(device, 'issu_in_progress')
+                            continue
+                        else:
+                            log.error("Max retries reached for ISSU in progress")
+                            step.failed(
+                                f"Failed to install image after {install_retry_attempts} attempts due to "
+                                f"ongoing ISSU operations on device {device.name}. "
+                                f"Please ensure no ISSU operations are in progress and retry.")
+                    elif getattr(device, 'clean_space', None):
+                        retry_count += 1
+                        if retry_count < install_retry_attempts:
+                            log.info("Attempting to free up space by deleting unprotected files.")
+                            log.info(f"Getting the default directory on device {device.name}")
+                            for attempt in range(2):
+                                try:
+                                    if device.is_ha:
+                                        device_default_dir = device.api.get_platform_default_dir(all_rp=True)
+                                    else:
+                                            device_default_dir = device.api.get_platform_default_dir()
+                                    break
+                                except Exception as e:
+                                    if attempt == 1:
+                                        raise
+                            log.info("Add image and package.conf packages to protected files")
+                            protected_files = get_protected_files(device, images[0])
+                            if device.is_ha:
+                                protected_files = {def_dir:protected_files for def_dir in device_default_dir}
+                            log.debug(f"Protected files are {protected_files}")
+                            try:
+                                free_space = device.api.free_up_disk_space(
+                                    destination=device_default_dir,
+                                    required_size=device.space_required * 1000, # the size in kb needs to be updated to bytes
+                                    protected_files=protected_files,
+                                    allow_deletion_failure=True,
+                                    skip_deletion=False)
+                                if not free_space:
+                                    step.failed("Unable to create enough space for "
+                                                f"image on device {device.name} .")
+                                else:
+                                    del device.clean_space
+                                    log.info(f"Successfully created enough space for image on device {device.name}")
+                            except Exception as e:
+                                step.failed(f"Could not free up space on the device {device.name} beacuse of {e}")
+                    else:
+                        step.failed("Failed to install the image due to an unexpected error", from_exception=e)
+
+            # Usually the device does auto reload after install operation
+            # This logic is to handle if the device did not reload
+            try:
+                # dialog processor to identify reload patterns
+                # upon detection of such a pattern, we perform reload and
+                # update the timeout, which is managed in the subsequent steps
+                log.debug(
+                    "Check if the device reloaded after installing the image"
+                )
+                check_reload_dialog.process(device.spawn,
+                                            timeout=reload_wait)
+            except TimeoutError:
+                # We deliberately trigger a timeout error under the assumption that the
+                # device did not auto reload.
+                device.execute("show version")
+                device.execute("show install summary")
+            else:
+                if hasattr(self, "image_to_boot") and self.image_to_boot:
+                    log.info(
+                        f"Set image to boot to {self.image_to_boot} for reload"
+                    )
+                    device.reload(image_to_boot=self.image_to_boot, **reload_args)
+                else:
+                    device.reload("", **reload_args)
+
+            device.execute("install commit")
 
             image_mapping = self.history["InstallImage"].parameters.setdefault(
-                "image_mapping", {}
-            )
+                "image_mapping", {})
             if hasattr(self, "new_boot_var"):
                 image_mapping.update({images[0]: self.new_boot_var})
+
+    def configure_no_boot_manual(self,
+                                 steps,
+                                 device):
+
+        # Configure no boot manual on the device to prevent the device from booting into manual mode after reload
+        with steps.start(
+                "Configure no boot manual on device") as step:
+            try:
+                device.api.configure_no_boot_manual()
+            except Exception:
+                step.passx(
+                    f"Unable to configure no boot manual on device {device.name}"
+                )
 
 
 class InstallRemoveSmu(BaseStage):
@@ -1072,7 +1326,7 @@ class InstallRemoveSmu(BaseStage):
     install_remove_smu:
         smu_reload_wait (int, optional): The maximum time allowed, in seconds,
             to differentiate between a hot SMU and a cold SMU.
-            Defaults to 30.
+            Defaults to 180.
 
         timeout (int, optional): Maximum time to wait for remove process to
             finish. Defaults to 800.
@@ -1088,7 +1342,7 @@ class InstallRemoveSmu(BaseStage):
     # Argument Defaults
     # =================
     TIMEOUT = 800
-    SMU_RELOAD_WAIT = 30
+    SMU_RELOAD_WAIT = 180
     RELOAD_SERVICE_ARGS = {
         "reload_creds": "default",
         "prompt_recovery": True,
@@ -1116,14 +1370,12 @@ class InstallRemoveSmu(BaseStage):
     # ==============================
     exec_order = ["remove_smu_image"]
 
-    def remove_smu_image(
-        self,
-        steps,
-        device,
-        timeout=TIMEOUT,
-        smu_reload_wait=SMU_RELOAD_WAIT,
-        reload_service_args=None
-    ):
+    def remove_smu_image(self,
+                         steps,
+                         device,
+                         timeout=TIMEOUT,
+                         smu_reload_wait=SMU_RELOAD_WAIT,
+                         reload_service_args=None):
 
         active_image = []
         deactivate_image = []
@@ -1141,166 +1393,180 @@ class InstallRemoveSmu(BaseStage):
 
             try:
                 output = device.parse("show install summary")
-                location = list(output.get("location").keys())[0]
-                for pkg in output.get("location").get(location).get("pkg_state"):
-                    file_state = output["location"][location]["pkg_state"][pkg][
-                        "state"
-                    ]
-                    file_type = output["location"][location]["pkg_state"][pkg][
-                        "type"
-                    ]
-                    filename_version = output["location"][location]["pkg_state"][pkg][
-                        "filename_version"
-                    ]
-
-                    if file_state == "C" and file_type == "SMU":
-                        active_image.append(filename_version)
-                    elif file_state == "D" and file_type == "SMU":
-                        deactivate_image.append(filename_version)
+                location = list(output.get("location").keys())
+                for each in location:
+                    for pkg in output.get("location").get(each).get("pkg_state"):
+                        file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                        file_type = output["location"][each]["pkg_state"][pkg]["type"]
+                        filename_version = output["location"][each]["pkg_state"][pkg]["filename_version"]
+                        # Check if image state is activated & committed
+                        if file_state == "C" and file_type == "SMU":
+                            active_image.append(filename_version)
+                        # Check if image state is uncommitted
+                        if file_state == "U" and file_type == "SMU":
+                            # Previously used image was left in uncommitted state
+                            output = device.execute("install commit")
+                            if "SUCCESS:" in output:
+                                active_image.append(filename_version)
+                        # Check if image state is deactivated & uncommitted
+                        elif file_state == "D" and file_type == "SMU":
+                            deactivate_image.append(filename_version)
 
                 log.info(f"Active images {active_image}")
                 if len(active_image):
                     for image in active_image:
                         log.info(f"SMU image to be deactivated: {image}")
-                        with super_step.start(f"Deactivate the smu image '{image}'") as step:
+                        with super_step.start(
+                                f"Deactivate the smu image '{image}'") as step:
                             try:
-                                install_smu_dialog = Dialog(
-                                    [
-                                        Statement(
-                                            pattern=r".*reload of the system\. "
-                                            r"Do you want to proceed\? \[y\/n\]",
-                                            action="sendline(y)",
-                                            loop_continue=True,
-                                            continue_timer=False,
-                                        ),
-                                        Statement(
-                                            pattern=r"FAILED:.*?$",
-                                            action=None,
-                                            loop_continue=False,
-                                            continue_timer=False,
-                                        )
-                                    ]
-                                )
+                                install_smu_dialog = Dialog([
+                                    Statement(
+                                        pattern=r".*reload of the system\. "
+                                        r"Do you want to proceed\? \[y\/n\]",
+                                        action="sendline(y)",
+                                        loop_continue=True,
+                                        continue_timer=False,
+                                    ),
+                                    Statement(
+                                        pattern=r"FAILED:.*?$",
+                                        action=None,
+                                        loop_continue=False,
+                                        continue_timer=False,
+                                    )
+                                ])
 
-                                reload_args.update(
-                                    {"timeout": timeout, "reply": install_smu_dialog}
-                                )
-                                check_reload_dialog = Dialog(
-                                    [
-                                        Statement(
-                                            pattern=r".*reloading, reason - Reload command",
-                                            action=None,
-                                            loop_continue=False,
-                                            continue_timer=False,
-                                        )
-                                    ]
-                                )
+                                reload_args.update({
+                                    "timeout": timeout,
+                                    "reply": install_smu_dialog
+                                })
+                                check_reload_dialog = Dialog([
+                                    Statement(
+                                        pattern=
+                                        r".*reloading, reason - Reload command",
+                                        action=None,
+                                        loop_continue=False,
+                                        continue_timer=False,
+                                    ),
+                                    Statement(
+                                        pattern=r".*Initializing Hardware\.",
+                                        action=None,
+                                        loop_continue=False,
+                                        continue_timer=False,
+                                    )
+                                ])
                                 # address the reload dialog prompt when encountering a cold SMU scenario
                                 device.execute(
-                                    "install deactivate file {}".format(image), reply=install_smu_dialog
-                                )
+                                    "install deactivate file {}".format(image),
+                                    reply=install_smu_dialog,
+                                    timeout=smu_reload_wait)
                                 # The key difference between hot and cold SMUs is that a reload occurs
                                 # with cold SMUs, whereas it does not with hot SMUs.
                                 try:
                                     # dialog processor to identify reload patterns in case of cold smu;
                                     # upon detection of such a pattern, we perform reload and
                                     # update the timeout, which is managed in the subsequent steps
-                                    check_reload_dialog.process(device.spawn, timeout=smu_reload_wait)
+                                    check_reload_dialog.process(
+                                        device.spawn, timeout=smu_reload_wait)
                                 except TimeoutError:
                                     # We deliberately trigger a timeout error under the assumption that the provided
                                     # image is a hot SMU, allowing us to continue with execution.
                                     device.execute("show version")
                                     device.execute("show install summary")
                                 else:
-                                    device.reload(
-                                        "", **reload_args
-                                    )
+                                    device.reload("", **reload_args)
                             except Exception as e:
-                                step.failed(
-                                    "Failed to deactivate SMU image", from_exception=e
-                                )
+                                step.failed("Failed to deactivate SMU image",
+                                            from_exception=e)
 
                         with super_step.start(f"Set {image} in inactive state") as step:
                             try:
                                 output = device.parse("show install summary")
-                                location = list(output.get("location").keys())[0]
-                                for pkg in (
-                                    output.get("location").get(location).get("pkg_state")
-                                ):
-                                    file_state = output["location"][location]["pkg_state"][
-                                        pkg
-                                    ]["state"]
-                                    if file_state == "D":
-                                        device.execute("install commit")
-                                        device.execute("show install summary")
-                                        log.info("The image is in inactivate state")
+                                location = list(output.get("location").keys())
+                                for each in location:
+                                    for pkg in (output.get("location").get(each).get("pkg_state")):
+                                        file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                                        # Check image is in deactivated & uncommitted state
+                                        if file_state == "D":
+                                            device.execute("install commit")
+                                            device.execute("show install summary")
+                                            log.info("The image is in inactivate state")
                             except Exception as e:
-                                step.failed("Failed to commit SMU image", from_exception=e)
+                                step.failed("Failed to commit SMU image",
+                                            from_exception=e)
 
-                        with super_step.start(f"Remove inactive smu image {image}") as step:
+                        with super_step.start(
+                                f"Remove inactive smu image {image}") as step:
                             try:
-                                install_remove_smu_inactive_dialog = Dialog(
-                                    [
-                                        Statement(
-                                            pattern=r".*Do you want to remove the above files\? \[y\/n\]",
-                                            action="sendline(y)",
-                                            loop_continue=False,
-                                            continue_timer=False,
-                                        ),
-                                    ]
-                                )
+                                install_remove_smu_inactive_dialog = Dialog([
+                                    Statement(
+                                        pattern=
+                                        r".*Do you want to remove the above files\? \[y\/n\]",
+                                        action="sendline(y)",
+                                        loop_continue=False,
+                                        continue_timer=False,
+                                    ),
+                                ])
                                 device.execute(
                                     "install remove inactive",
-                                    service_dialog=install_remove_smu_inactive_dialog,
+                                    service_dialog=
+                                    install_remove_smu_inactive_dialog,
                                     timeout=timeout,
                                 )
                             except Exception as e:
-                                step.failed("Failed to remove inactive smu image", from_exception=e)
-                                log.info("The installed SMU image is in committed state")
+                                step.failed(
+                                    "Failed to remove inactive smu image",
+                                    from_exception=e)
+                                log.info(
+                                    "The installed SMU image is in committed state"
+                                )
 
                 log.info(f"Deactive images {deactivate_image}")
                 if len(deactivate_image):
                     for image in deactivate_image:
                         log.info(f"SMU image to be deactivated: {image}")
                         with super_step.start(f"Set {image} in inactive state") as step:
+
                             try:
                                 output = device.parse("show install summary")
-                                location = list(output.get("location").keys())[0]
-                                for pkg in (
-                                    output.get("location").get(location).get("pkg_state")
-                                ):
-                                    file_state = output["location"][location]["pkg_state"][
-                                        pkg
-                                    ]["state"]
-                                    if file_state == "D":
-                                        device.execute("install commit")
-                                        device.execute("show install summary")
-                                        log.info("The image is in inactivate state")
+                                location = list(output.get("location").keys())
+                                for each in location:
+                                    for pkg in (output.get("location").get(each).get("pkg_state")):
+                                        file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                                        # check if image state is deactivated & uncommitted
+                                        if file_state == "D":
+                                            device.execute("install commit")
+                                            device.execute("show install summary")
+                                            log.info("The image is in inactivate state")
                             except Exception as e:
-                                step.failed("Failed to commit SMU image", from_exception=e)
+                                step.failed("Failed to commit SMU image",
+                                            from_exception=e)
 
-                        with super_step.start("Remove inactive smu image") as step:
+                        with super_step.start(
+                                "Remove inactive smu image") as step:
                             try:
-                                install_remove_smu_inactive_dialog = Dialog(
-                                    [
-                                        Statement(
-                                            pattern=r".*Do you want to remove the above files\? \[y\/n\]",
-                                            action="sendline(y)",
-                                            loop_continue=False,
-                                            continue_timer=False,
-                                        ),
-                                    ]
-                                )
+                                install_remove_smu_inactive_dialog = Dialog([
+                                    Statement(
+                                        pattern=
+                                        r".*Do you want to remove the above files\? \[y\/n\]",
+                                        action="sendline(y)",
+                                        loop_continue=False,
+                                        continue_timer=False,
+                                    ),
+                                ])
                                 device.execute(
                                     "install remove inactive",
-                                    service_dialog=install_remove_smu_inactive_dialog,
+                                    service_dialog=
+                                    install_remove_smu_inactive_dialog,
                                     timeout=timeout,
                                 )
                             except Exception as e:
-                                step.failed("Failed to remove inactive smu image", from_exception=e)
+                                step.failed(
+                                    "Failed to remove inactive smu image",
+                                    from_exception=e)
 
             except Exception as e:
-                super_step.failed("Failed to check state of smu image", from_exception=e)
+                super_step.failed("Failed to check state of smu image",
+                                  from_exception=e)
             else:
                 if file_type == "IMG":
                     super_step.skipped("No smu image to remove")
@@ -1321,7 +1587,7 @@ class InstallSmu(BaseStage):
 
         smu_reload_wait (int, optional): The maximum time allowed, in seconds,
             to differentiate between a hot SMU and a cold SMU.
-            Defaults to 30.
+            Defaults to 180.
 
         reload_service_args (optional):
 
@@ -1351,7 +1617,7 @@ class InstallSmu(BaseStage):
     # Argument Defaults
     # =================
     SKIP_SAVE_RUNNING_CONFIG = False
-    SMU_RELOAD_WAIT = 30
+    SMU_RELOAD_WAIT = 180
     INSTALL_TIMEOUT = 800
     RELOAD_SERVICE_ARGS = {
         "reload_creds": "default",
@@ -1394,9 +1660,11 @@ class InstallSmu(BaseStage):
         with steps.start("Installing smu image") as super_step:
 
             if not images:
-                super_step.skipped("No smu image provided, skipping install_smu stage")
+                super_step.skipped(
+                    "No smu image provided, skipping install_smu stage")
             if "smu" not in images[0]:
-                super_step.skipped("No smu image provided, skipping install_smu stage")
+                super_step.skipped(
+                    "No smu image provided, skipping install_smu stage")
 
             # Set default reload args
             reload_args = self.RELOAD_SERVICE_ARGS.copy()
@@ -1408,129 +1676,135 @@ class InstallSmu(BaseStage):
             if reload_service_args:
                 reload_args.update(reload_service_args)
 
-            install_smu_dialog = Dialog(
-                [
-                    Statement(
-                        pattern=r".*reload of the system\. "
-                        r"Do you want to proceed\? \[y\/n\]",
-                        action="sendline(y)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"FAILED:.*?$",
-                        action=None,
-                        loop_continue=False,
-                        continue_timer=False,
-                    )
-                ]
-            )
+            install_smu_dialog = Dialog([
+                Statement(
+                    pattern=r".*reload of the system\. "
+                    r"Do you want to proceed\? \[y\/n\]",
+                    action="sendline(y)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"FAILED:.*?$",
+                    action=None,
+                    loop_continue=False,
+                    continue_timer=False,
+                )
+            ])
             log.info(f"Images: {images}")
             for image in images:
-                with super_step.start("Save the running config to the startup config") as step:
+                with super_step.start(
+                        "Save the running config to the startup config"
+                ) as step:
                     try:
-                        device.api.execute_copy_run_to_start(max_time=60, check_interval=30)
+                        device.api.execute_copy_run_to_start(max_time=60,
+                                                             check_interval=30)
                     except Exception as e:
-                        step.failed("Failed to save the running config", from_exception=e)
+                        step.failed("Failed to save the running config",
+                                    from_exception=e)
 
                 with super_step.start(f"Add SMU image : '{image}'") as step:
                     try:
                         device.execute("install add file {}".format(image))
                     except Exception as e:
-                        step.failed("Failed to add SMU image", from_exception=e)
+                        step.failed("Failed to add SMU image",
+                                    from_exception=e)
 
-                with super_step.start("Verify SMU image is added successfully") as step:
+                with super_step.start(
+                        "Verify SMU image is added successfully") as step:
                     try:
                         output = device.parse("show install summary")
-                        location = list(output.get("location").keys())[0]
-                        for pkg in output.get("location").get(location).get("pkg_state"):
-                            file_state = output["location"][location]["pkg_state"][pkg][
-                                "state"
-                            ]
-                            file_type = output["location"][location]["pkg_state"][pkg][
-                                "type"
-                            ]
-                            filename_version = output["location"][location]["pkg_state"][pkg][
-                                "filename_version"
-                            ]
-                            try:
-                                if file_state == "I" and file_type == "SMU" and filename_version in image:
-                                    log.info("The installed SMU image is in inactive state")
-                            except Exception as e:
-                                step.failed("Failed to add the SMU image", from_exception=e)
+                        location = list(output.get("location").keys())
+                        for each in location:
+                            for pkg in output.get("location").get(each).get("pkg_state"):
+                                file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                                file_type = output["location"][each]["pkg_state"][pkg]["type"]
+                                filename_version = output["location"][each]["pkg_state"][pkg]["filename_version"]
+                                try:
+                                    # Check if image state is inactive
+                                    if file_state == "I" and file_type == "SMU" and filename_version in image:
+                                        log.info("The installed SMU image is in inactive state")
+                                except Exception as e:
+                                    step.failed("Failed to add the SMU image",
+                                                from_exception=e)
                     except Exception as e:
-                        step.failed("Failed to verify SMU image", from_exception=e)
+                        step.failed("Failed to verify SMU image",
+                                    from_exception=e)
 
-                with super_step.start(f"Activate the SMU file with image '{image}'") as step:
+                with super_step.start(
+                        f"Activate the SMU file with image '{image}'") as step:
                     try:
-                        reload_args.update(
-                            {"timeout": install_timeout, "reply": install_smu_dialog}
-                        )
+                        reload_args.update({
+                            "timeout": install_timeout,
+                            "reply": install_smu_dialog
+                        })
 
-                        check_reload_dialog = Dialog(
-                            [
-                                Statement(
-                                    pattern=r".*reloading, reason - Reload command",
-                                    action=None,
-                                    loop_continue=False,
-                                    continue_timer=False,
-                                )
-                            ]
-                        )
+                        check_reload_dialog = Dialog([
+                            Statement(
+                                pattern=r".*reloading, reason - Reload command",
+                                action=None,
+                                loop_continue=False,
+                                continue_timer=False,
+                            )
+                        ])
                         # address the reload dialog prompt when encountering a cold SMU scenario
                         device.execute(
-                            "install activate file {}".format(image), reply=install_smu_dialog
-                        )
+                            "install activate file {}".format(image),
+                            reply=install_smu_dialog,
+                            timeout=smu_reload_wait)
                         # The key difference between hot and cold SMUs is that a reload occurs
                         # with cold SMUs, whereas it does not with hot SMUs.
                         try:
                             # dialog processor to identify reload patterns in case of cold smu;
                             # upon detection of such a pattern, we perform reload and
                             # update the timeout, which is managed in the subsequent steps
-                            check_reload_dialog.process(device.spawn, timeout=smu_reload_wait)
+                            check_reload_dialog.process(
+                                device.spawn, timeout=smu_reload_wait)
                         except TimeoutError:
                             # We deliberately trigger a timeout error under the assumption that the provided
                             # image is a hot SMU, allowing us to continue with execution.
                             device.execute("show version")
                             device.execute("show install summary")
                         else:
-                            device.reload(
-                                "", **reload_args
-                            )
+                            device.reload("", **reload_args)
                     except Exception as e:
-                        step.failed("Failed to activate SMU image", from_exception=e)
+                        step.failed("Failed to activate SMU image",
+                                    from_exception=e)
 
-                with super_step.start("Commit the SMU file with image") as step:
+                with super_step.start(
+                        "Commit the SMU file with image") as step:
                     try:
                         output = device.parse("show install active")
-                        location = list(output.get("location").keys())[0]
-                        for pkg in output.get("location").get(location).get("pkg_state"):
-                            file_state = output["location"][location]["pkg_state"][pkg][
-                                "state"
-                            ]
-                            if file_state == "U":
-                                device.execute("install commit")
-                                log.info("The image is activated and uncommitted")
+                        location = list(output.get("location").keys())
+                        for each in location:
+                            for pkg in output.get("location").get(each).get("pkg_state"):
+                                file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                                # check if image state is activated and uncommitted
+                                if file_state == "U":
+                                    device.execute("install commit")
+                                    log.info("The image is activated and uncommitted")
                     except Exception as e:
-                        step.failed("Failed to activate SMU image", from_exception=e)
+                        step.failed("Failed to activate SMU image",
+                                    from_exception=e)
 
-                with super_step.start("Check if SMU is applied succesfully") as step:
+                with super_step.start(
+                        "Check if SMU is applied succesfully") as step:
                     try:
                         output = device.parse("show install summary")
-                        for pkg in output.get("location").get(location).get("pkg_state"):
-                            file_state = output["location"][location]["pkg_state"][pkg][
-                                "state"
-                            ]
-                            filename_version = output["location"][location]["pkg_state"][pkg][
-                                "filename_version"
-                            ]
-                            #get_image name
-                            image_name = re.split(r"[:/]", filename_version)[-1]
-                            if file_state == "C" and image_name in image:
-                                log.info(f"Applied SMU image {filename_version} successfully")
+                        location = list(output.get("location").keys())
+                        for each in location:
+                            for pkg in output.get("location").get(each).get("pkg_state"):
+                                file_state = output["location"][each]["pkg_state"][pkg]["state"]
+                                filename_version = output["location"][each]["pkg_state"][pkg]["filename_version"]
+                                # get_image name
+                                image_name = re.split(r"[:/]", filename_version)[-1]
+                                # check if image state is activated and committed
+                                if file_state == "C" and image_name in image:
+                                    log.info(f"Applied SMU image {filename_version} successfully")
 
                     except Exception as e:
-                        step.failed("Failed to apply SMU image", from_exception=e)
+                        step.failed("Failed to apply SMU image",
+                                    from_exception=e)
 
 
 class InstallPackages(BaseStage):
@@ -1586,39 +1860,34 @@ class InstallPackages(BaseStage):
         install_timeout=INSTALL_TIMEOUT,
     ):
 
-        install_add_one_shot_dialog = Dialog(
-            [
-                Statement(
-                    pattern=r".*Press Quit\(q\) to exit, you may save "
-                    r"configuration and re-enter the command\. "
-                    r"\[y\/n\/q\]",
-                    action="sendline(y)" if save_system_config else "sendline(n)",
-                    loop_continue=True,
-                    continue_timer=False,
-                ),
-                Statement(
-                    pattern=r".*Please confirm you have changed boot config "
-                    r"to \S+ \[y\/n\]",
-                    action="sendline(y)",
-                    loop_continue=True,
-                    continue_timer=False,
-                ),
-                Statement(
-                    pattern=r".*This operation may require a reload of the "
-                    r"system\. Do you want to proceed\? \[y\/n\]",
-                    action="sendline(y)",
-                    loop_continue=True,
-                    continue_timer=False,
-                ),
-            ]
-        )
+        install_add_one_shot_dialog = Dialog([
+            Statement(
+                pattern=r".*Press Quit\(q\) to exit, you may save "
+                r"configuration and re-enter the command\. "
+                r"\[y\/n\/q\]",
+                action="sendline(y)" if save_system_config else "sendline(n)",
+                loop_continue=True,
+                continue_timer=False,
+            ),
+            Statement(
+                pattern=r".*Please confirm you have changed boot config "
+                r"to \S+ \[y\/n\]",
+                action="sendline(y)",
+                loop_continue=True,
+                continue_timer=False,
+            ),
+            Statement(
+                pattern=r".*This operation may require a reload of the "
+                r"system\. Do you want to proceed\? \[y\/n\]",
+                action="sendline(y)",
+                loop_continue=True,
+                continue_timer=False,
+            ),
+        ])
 
         for pkg in packages:
-            with steps.start(
-                "Installing package '{pkg}' onto {dev}".format(
-                    pkg=pkg, dev=device.hostname
-                )
-            ) as step:
+            with steps.start("Installing package '{pkg}' onto {dev}".format(
+                    pkg=pkg, dev=device.hostname)) as step:
 
                 try:
                     device.execute(
@@ -1628,7 +1897,8 @@ class InstallPackages(BaseStage):
                         timeout=install_timeout,
                     )
                 except Exception as e:
-                    step.failed("Failed to install the package", from_exception=e)
+                    step.failed("Failed to install the package",
+                                from_exception=e)
 
 
 class Reload(BaseStage):
@@ -1706,7 +1976,9 @@ class Reload(BaseStage):
     # Stage Schema
     # ============
     schema = {
-        Optional("license"): {Optional("check"): bool},
+        Optional("license"): {
+            Optional("check"): bool
+        },
         Optional("check_modules"): {
             Optional("check"): bool,
             Optional("timeout"): int,
@@ -1726,7 +1998,9 @@ class Reload(BaseStage):
     # ==============================
     # Execution order of Stage steps
     # ==============================
-    exec_order = ["reload", "license", "disconnect_and_reconnect", "check_modules"]
+    exec_order = [
+        "reload", "license", "disconnect_and_reconnect", "check_modules"
+    ]
 
     def reload(
         self,
@@ -1754,7 +2028,9 @@ class Reload(BaseStage):
 
         def break_reload(device):
             """Breaks the reload process on a device"""
-            log.info(f"Boot variable does not exist!!! Breaking the reload process.")
+            log.info(
+                f"Boot variable does not exist!!! Breaking the reload process."
+            )
             # Send No to exit from reload process
             device.sendline("N")
 
@@ -1763,27 +2039,26 @@ class Reload(BaseStage):
 
         # Disable device_recovey for reload in unicon
         self.reload_service_args.update({"device_recovery": False})
-        reload_dialog = Dialog(
-            [
-                Statement(
-                    pattern=r".*Do you wish to proceed with reload anyway\[confirm\].*",
-                    action="sendline(y)",
-                    loop_continue=True,
-                    continue_timer=False,
-                )
-            ]
-        )
+        reload_dialog = Dialog([
+            Statement(
+                pattern=
+                r".*Do you wish to proceed with reload anyway\[confirm\].*",
+                action="sendline(y)",
+                loop_continue=True,
+                continue_timer=False,
+            )
+        ])
 
         if attempt_manual_boot:
             reload_dialog.append(
                 Statement(
-                    pattern=r".*Boot variable either does not exist or buffer is too small.*",
+                    pattern=
+                    r".*Boot variable either does not exist or buffer is too small.*",
                     action=break_reload,
                     args={"device": device},
                     loop_continue=False,
                     continue_timer=False,
-                ),
-            )
+                ), )
 
         self.reload_service_args.update({"reply": reload_dialog})
 
@@ -1806,7 +2081,8 @@ class Reload(BaseStage):
                 # capture the current boot settings to restore it on later stage
                 try:
                     output = device.parse("show boot")
-                    config_reg = output.get("active", {}).get("configuration_register")
+                    config_reg = output.get("active",
+                                            {}).get("configuration_register")
                 except Exception as e:
                     log.exception(
                         f"Failed to get the boot information for {device.name}, Error: {e}"
@@ -1822,7 +2098,8 @@ class Reload(BaseStage):
                         if con.role == "standby":
                             con.context["boot_cmd"] = cmd
 
-                with super_step.start(f"Reload using manual boot for {device.name}") as step:
+                with super_step.start(
+                        f"Reload using manual boot for {device.name}") as step:
                     try:
                         device.reload(reload_command=cmd)
 
@@ -1835,7 +2112,8 @@ class Reload(BaseStage):
 
                 # Restore the boot settings
                 if config_reg:
-                    device.api.execute_set_config_register(config_register=config_reg)
+                    device.api.execute_set_config_register(
+                        config_register=config_reg)
 
             except Exception as e:
                 super_step.failed(
@@ -1849,13 +2127,13 @@ class Reload(BaseStage):
         if license is None:
             license = self.LICENSE
 
-        with steps.start(f"Check license inconsistency on {device.name}") as step:
+        with steps.start(
+                f"Check license inconsistency on {device.name}") as step:
 
             if license["check"]:
                 out = device.parse("show version")
                 if out.q.get_values("license_level", 0) == out.q.get_values(
-                    "next_reload_license_level", 0
-                ):
+                        "next_reload_license_level", 0):
                     step.passed("No license inconsistency.")
                 else:
                     try:
@@ -1869,9 +2147,11 @@ class Reload(BaseStage):
             else:
                 step.skipped("License check is not enabled.")
 
-    def disconnect_and_reconnect(
-        self, steps, device, reload_service_args=None, reconnect_via=RECONNECT_VIA
-    ):
+    def disconnect_and_reconnect(self,
+                                 steps,
+                                 device,
+                                 reload_service_args=None,
+                                 reconnect_via=RECONNECT_VIA):
 
         if reload_service_args is None:
             # If user provides no custom values, take the defaults
@@ -1907,41 +2187,31 @@ class Reload(BaseStage):
                 if device.is_ha and hasattr(device, "subconnections"):
                     if isinstance(device.subconnections, list):
                         rommon_to_disable = device.subconnections[
-                            0
-                        ].state_machine.get_path("rommon", "disable")
+                            0].state_machine.get_path("rommon", "disable")
                 else:
                     rommon_to_disable = device.state_machine.get_path(
-                        "rommon", "disable"
-                    )
+                        "rommon", "disable")
             except ValueError:
-                log.warning("There is no path between rommon and disable states.")
+                log.warning(
+                    "There is no path between rommon and disable states.")
             except IndexError:
                 log.warning("There is no connection in device.subconnections")
             if rommon_to_disable and hasattr(rommon_to_disable, "command"):
                 original_command = rommon_to_disable.command
                 if device.is_ha:
                     index = device.subconnections[0].state_machine.paths.index(
-                        rommon_to_disable
-                    )
+                        rommon_to_disable)
                     for subcon in device.subconnections:
                         subcon.state_machine.paths[index].command = (
                             lambda state, spawn, context: raise_(
-                                Exception(
-                                    f"Device {device.name} is still "
-                                    f"in rommon state after reload."
-                                )
-                            )
-                        )
+                                Exception(f"Device {device.name} is still "
+                                          f"in rommon state after reload.")))
                 else:
                     index = device.state_machine.paths.index(rommon_to_disable)
                     device.state_machine.paths[index].command = (
                         lambda state, spawn, context: raise_(
-                            Exception(
-                                f"Device {device.name} is still "
-                                f"in rommon state after reload."
-                            )
-                        )
-                    )
+                            Exception(f"Device {device.name} is still "
+                                      f"in rommon state after reload.")))
 
             try:
                 device.connect()
@@ -1950,14 +2220,16 @@ class Reload(BaseStage):
             if hasattr(device, "platform") and device.platform != "sdwan":
                 if rommon_to_disable and hasattr(rommon_to_disable, "command"):
                     if device.is_ha:
-                        index = device.subconnections[0].state_machine.paths.index(
-                            rommon_to_disable
-                        )
+                        index = device.subconnections[
+                            0].state_machine.paths.index(rommon_to_disable)
                         for subcon in device.subconnections:
-                            subcon.state_machine.paths[index].command = original_command
+                            subcon.state_machine.paths[
+                                index].command = original_command
                     else:
-                        index = device.state_machine.paths.index(rommon_to_disable)
-                        device.state_machine.paths[index].command = original_command
+                        index = device.state_machine.paths.index(
+                            rommon_to_disable)
+                        device.state_machine.paths[
+                            index].command = original_command
 
     def check_modules(self, steps, device, check_modules=None):
 
@@ -1974,8 +2246,8 @@ class Reload(BaseStage):
         if check_modules["check"]:
 
             with steps.start(
-                f"Checking the modules on '{device.name}' are in a " f"stable state"
-            ) as step:
+                    f"Checking the modules on '{device.name}' are in a "
+                    f"stable state") as step:
 
                 try:
                     device.api.verify_module_status(
@@ -1984,7 +2256,8 @@ class Reload(BaseStage):
                         ignore_modules=check_modules["ignore_modules"],
                     )
                 except Exception as e:
-                    step.failed("Modules are not in a stable state", from_exception=e)
+                    step.failed("Modules are not in a stable state",
+                                from_exception=e)
 
 
 class RommonBoot(BaseStage):
@@ -1995,10 +2268,10 @@ class RommonBoot(BaseStage):
     ------------
     rommon_boot:
 
-        image (list): Image to boot with
+        image (list, optional): Image to boot with
 
         tftp (optional): If specified boot via tftp otherwise boot using local
-            image.
+            image (list): image to boot
 
             ip_address (list, optional): Management ip address to configure to reach to the
                 tftp server
@@ -2008,19 +2281,12 @@ class RommonBoot(BaseStage):
             gateway (str, optional): Management gateway
 
             tftp_server (str, optional): Tftp server that is reachable with management interface
-
-
-        recovery_password (str): Enable password for device
-            required after bootup. Defaults to None.
-
-        recovery_enable_password (str): Enable password for device
-            required after bootup. Defaults to None.
-
-        recovery_username (str): Enable username for device
-            required after bootup. Defaults to None.
+            
 
         save_system_config (bool, optional): Whether or not to save the
             system config if it was modified. Defaults to True.
+
+        grub_activity_pattern (str): Break pattern on the device for grub boot mode
 
         timeout (int, optional): Max time allowed for the booting process.
             Defaults to 600.
@@ -2033,7 +2299,7 @@ class RommonBoot(BaseStage):
 
         rommon_timeout (int, optional): Timeout after bringing the device to rommon. Default to 15 sec.
 
-        reconnect_timeout (int, optional): Timeout to reconnect the device after booting. Default to 90 sec.
+        reconnect_timeout (int, optional): Timeout to reconnect the device after booting. Default to 120 sec.
 
     Example
     -------
@@ -2045,13 +2311,11 @@ class RommonBoot(BaseStage):
             gateway: 10.1.7.1
             subnet_mask: 255.255.255.0
             tftp_server: 11.1.7.251
-        recovery_password: nbv_12345
-        recovery_username: user_12345
-        recovery_enable_password: en
         save_system_config: False
         timeout: 600
         config_reg_timeout: 10
         config_register: 0x0
+        grub_activity_pattern: 'The highlighted entry will be (?:booted|executed) automatically'
 
     There is more than one ip address, one for each supervisor.
 
@@ -2061,7 +2325,6 @@ class RommonBoot(BaseStage):
         Defaults to 0x0.
 
     testbed:
-      name:
       name:
       passwords:
         tacacs: test
@@ -2087,21 +2350,21 @@ class RommonBoot(BaseStage):
     # =================
     # Argument Defaults
     # =================
-    RECOVERY_PASSWORD = None
-    RECOVERY_ENABLE_PASSWORD = None
-    RECOVERY_USERNAME = None
+    GRUB_ACTIVITY_PATTERN = None
     SAVE_SYSTEM_CONFIG = True
     TIMEOUT = 600
     ETHER_PORT = 0
     ROMMON_TIMEOUT = 15
-    RECONNECT_TIMEOUT = 90
+    RECONNECT_TIMEOUT = 120
     CONFIG_REGISTER = "0x0"
+    IMAGE = []
+    TFTP = {}
 
     # ============
     # Stage Schema
     # ============
     schema = {
-        "image": list,
+        Optional("image"): list,
         Optional("tftp"): {
             Optional("ip_address"): list,
             Optional("subnet_mask"): str,
@@ -2109,13 +2372,12 @@ class RommonBoot(BaseStage):
             Optional("tftp_server"): str,
         },
         Optional("save_system_config"): bool,
-        Optional("recovery_password"): str,
-        Optional("recovery_username"): str,
-        Optional("recovery_enable_password"): str,
+        Optional("grub_activity_pattern"): str,
         Optional("timeout"): int,
         Optional("ether_port"): int,
         Optional("rommon_timeout"): int,
         Optional("config_register"): str,
+        Optional("reconnect_timeout"): int,
     }
 
     # ==============================
@@ -2135,9 +2397,8 @@ class RommonBoot(BaseStage):
             try:
                 device.configure("no boot system")
             except Exception as e:
-                step.failed(
-                    "Failed to delete configured boot variables", from_exception=e
-                )
+                step.failed("Failed to delete configured boot variables",
+                            from_exception=e)
 
     def write_memory(self, steps, device):
         with steps.start("Write memory") as step:
@@ -2157,29 +2418,36 @@ class RommonBoot(BaseStage):
             try:
                 device.rommon(config_register=config_register)
             except Exception as e:
-                step.failed("Failed to bring device to rommon!", from_exception=e)
+                step.failed("Failed to bring device to rommon!",
+                            from_exception=e)
 
             log.info("Device is reloading")
-            device.destroy_all()
 
-    def rommon_boot(
-        self,
-        steps,
-        device,
-        image,
-        tftp=None,
-        timeout=TIMEOUT,
-        recovery_password=RECOVERY_PASSWORD,
-        recovery_username=RECOVERY_USERNAME,
-        recovery_enable_password=RECOVERY_ENABLE_PASSWORD,
-        ether_port=ETHER_PORT,
-    ):
+    def rommon_boot(self,
+                    steps,
+                    device,
+                    image=IMAGE,
+                    tftp=TFTP,
+                    timeout=TIMEOUT,
+                    grub_activity_pattern=GRUB_ACTIVITY_PATTERN):
         with steps.start("Boot device from rommon") as step:
-            if tftp is not None:
+
+            log.info(
+                f'Get the recovery details from clean for device {device.name}'
+            )
+            try:
+                recovery_info = device.clean.get('device_recovery', {})
+            except AttributeError:
+                log.info(f'There is no recovery info for device {device.name}')
+                recovery_info = {}
+
+            if tftp:
+                log.warning(
+                    'Passing TFTP information to rommon boot is deprecated. Use device recovery tftp information instead.'
+                )
                 # Check if management attribute in device object, if not set to empty dict
                 if not hasattr(device, "management"):
                     setattr(device, "management", {})
-
                 # Getting the tftp information, if the info not provided by user, it takes from testbed
                 address = device.management.get("address", {}).get("ipv4", "")
                 if isinstance(address, IPv4Interface):
@@ -2191,69 +2459,200 @@ class RommonBoot(BaseStage):
                 tftp.setdefault("ip_address", ip_address)
                 tftp.setdefault("subnet_mask", subnet_mask)
                 tftp.setdefault(
-                    "gateway", str(device.management.get("gateway", {}).get("ipv4"))
-                )
+                    "gateway",
+                    str(device.management.get("gateway", {}).get("ipv4")))
                 tftp.setdefault(
-                    "tftp_server", device.testbed.servers.get("tftp", {}).get("address")
+                    "tftp_server",
+                    device.testbed.servers.get("tftp", {}).get("address"))
+
+                log.info(
+                    "checking if all the tftp information is given by the user"
                 )
+                if tftp and not all(tftp.values()):
+                    log.warning(f"Some TFTP information is missing: {tftp}")
+                    # setting tftp empty if ttfp information is missing
+                    tftp = {}
 
-            log.info("checking if all the tftp information is given by the user")
-            if tftp and not all(tftp.values()):
-                log.warning(f"Some TFTP information is missing: {tftp}")
-                # setting tftp empty if ttfp information is missing
-                tftp = {}
+            tftp_boot = recovery_info.get('tftp_boot', {}) or tftp
 
-            # Need to instantiate to get the device.start
-            # The device.start only works because of a|b
-            device.instantiate(connection_timeout=timeout)
-
-            try:
-                abstract = Lookup.from_device(device, packages={"clean": clean})
-            except Exception as e:
-                step.failed("Abstraction lookup failed", from_exception=e)
-
-            # device.start only gets filled with single rp devices
-            # for multiple rp devices we need to use subconnections
-            if device.is_ha and hasattr(device, "subconnections"):
-                start = [i.start[0] for i in device.subconnections]
-            else:
-                start = device.start
-
-            common_kwargs = {"device": device, "timeout": timeout}
-
-            if tftp:
-                tftp.update({"image": image, "ether_port": ether_port})
-                common_kwargs.update({"tftp_boot": tftp})
-            else:
-                common_kwargs.update({"golden_image": image})
-
-            # Update recovery username and password
-            common_kwargs.update(
-                {
-                    "recovery_username": recovery_username,
-                    "recovery_en_password": recovery_enable_password,
-                    "recovery_password": recovery_password,
-                }
+            timeout = timeout or recovery_info.get('timeout') or 750
+            image = recovery_info.get('golden_image', []) or image
+            grub_activity_pattern = grub_activity_pattern or recovery_info.get(
+                'grub_activity_pattern',
+                'The highlighted entry will be (?:booted|executed) automatically'
             )
 
+            if image:
+                log.info(banner("Booting device '{}' with the Golden images".\
+                                format(device.name)))
+                log.info("Clean image information found:\n{}".format(image))
+
+            elif tftp_boot:
+                log.info(banner("Booting device '{}' with the Tftp images".\
+                                format(device.name)))
+                log.info("Tftp boot information found:\n{}".format(tftp_boot))
+
+            else:
+                raise Exception(
+                    'Global recovery only support golden image and tftp '
+                    'boot recovery and neither was provided')
+
+            if device.is_ha and hasattr(device, 'subconnections'):
+                conn_list = device.subconnections
+            else:
+                conn_list = [device.default]
+
+            for con in conn_list:
+                if con.state_machine.current_state != 'rommon':
+                    raise Exception(
+                        f'Device {device.name} is not in rommon state could not boot the device.'
+                    )
+                else:
+                    log.info(f'Device {device.name} is in rommon state!')
+
             try:
-                pcall(
-                    targets=abstract.clean.recovery.recovery.recovery_worker,
-                    start=start,
-                    ikwargs=[{"item": i} for i, _ in enumerate(start)],
-                    ckwargs=common_kwargs,
-                )
+                # golden image for that we need to boot each subconnetion in a separate process.
+                if image:
+                    futures = []
+                    executor = ThreadPoolExecutor(max_workers=len(conn_list))
+                    for con in conn_list:
+                        futures.append(
+                            executor.submit(
+                                RommonBoot.task,
+                                con,
+                                timeout,
+                                image,
+                                grub_activity_pattern,
+                            ))
+                    log.info(
+                        f"The Timeout value to verify the grub prompt is {timeout}"
+                    )
+                    wait_futures(futures,
+                                 timeout=timeout,
+                                 return_when=ALL_COMPLETED)
+                elif tftp_boot:
+                    device.api.device_rommon_boot(tftp_boot=tftp_boot)
             except Exception as e:
-                step.failed("Failed to boot the device from rommon", from_exception=e)
+                step.failed("Failed to boot the device from rommon",
+                            from_exception=e)
+
+    def task(con, timeout, image, grub_activity_pattern):
+        """
+        A method for processing a dialog that loads a local image onto a device
+
+        Args:
+            con (obj): connection object
+            timeout (int, optional): Recovery process timeout. Defaults to 600.
+            image (dict): Information to load golden image on the device
+            grub_activity_pattern (str): Grub activity pattern
+        Returns:
+            None
+        """
+        # if we have grup activity pattern then we need to update the context with grub boot image
+
+        if grub_activity_pattern:
+            image_to_boot = con.context.get('grub_boot_image')
+            con.context['grub_boot_image'] = image[0]
+
+        # check for image to boot if we have a value store it and replace it with the golden image
+        image_to_boot = con.context.get('image_to_boot')
+        con.context['image_to_boot'] = image[0]
+
+        # these statments needed for booting from grub menu
+        def _grub_boot_device(spawn, session, context):
+            # '\033' == <ESC>
+            spawn.send('\033')
+            time.sleep(0.8)
+
+        grub_prompt_stmt = \
+            Statement(pattern=r'.*grub *>.*',
+                    action=_grub_boot_device,
+                    args=None,
+                    loop_continue=True,
+                    continue_timer=False)
+
+        grub_boot_stmt = \
+            Statement(pattern=r'.*Use the UP and DOWN arrow keys to select.*',
+                    action=grub_prompt_handler,
+                    args=None,
+                    loop_continue=True,
+                    continue_timer=False)
+
+        dialog = Dialog([grub_boot_stmt, grub_prompt_stmt])
+
+        con.state_machine.go_to('enable',
+                                con.spawn,
+                                timeout=timeout,
+                                context=con.context,
+                                dialog=dialog,
+                                prompt_recovery=True)
+        # we need to set the value of grub_boot_image and image_to_boot to original value
+        if grub_activity_pattern:
+            con.context['grub_boot_image'] = image_to_boot
+        con.context['image_to_boot'] = image_to_boot
+
+    def task(con, timeout, image, grub_activity_pattern):
+        """
+        A method for processing a dialog that loads a local image onto a device
+
+        Args:
+            con (obj): connection object
+            timeout (int, optional): Recovery process timeout. Defaults to 600.
+            image (dict): Information to load golden image on the device
+            grub_activity_pattern (str): Grub activity pattern
+        Returns:
+            None
+        """
+        # if we have grup activity pattern then we need to update the context with grub boot image
+
+        if grub_activity_pattern:
+            image_to_boot = con.context.get('grub_boot_image')
+            con.context['grub_boot_image'] = image[0]
+
+        # check for image to boot if we have a value store it and replace it with the golden image
+        image_to_boot = con.context.get('image_to_boot')
+        con.context['image_to_boot'] = image[0]
+
+        # these statments needed for booting from grub menu
+        def _grub_boot_device(spawn, session, context):
+            # '\033' == <ESC>
+            spawn.send('\033')
+            time.sleep(0.8)
+
+        grub_prompt_stmt = \
+            Statement(pattern=r'.*grub *>.*',
+                    action=_grub_boot_device,
+                    args=None,
+                    loop_continue=True,
+                    continue_timer=False)
+
+        grub_boot_stmt = \
+            Statement(pattern=r'.*Use the UP and DOWN arrow keys to select.*',
+                    action=grub_prompt_handler,
+                    args=None,
+                    loop_continue=True,
+                    continue_timer=False)
+
+        dialog = Dialog([grub_boot_stmt, grub_prompt_stmt])
+
+        con.state_machine.go_to('enable',
+                                con.spawn,
+                                timeout=timeout,
+                                context=con.context,
+                                dialog=dialog,
+                                prompt_recovery=True)
+        # we need to set the value of grub_boot_image and image_to_boot to original value
+        if grub_activity_pattern:
+            con.context['grub_boot_image'] = image_to_boot
+        con.context['image_to_boot'] = image_to_boot
 
     def reconnect(self, steps, device, reconnect_timeout=RECONNECT_TIMEOUT):
         with steps.start("Reconnect to device") as step:
 
-            if (
-                getattr(device, "chassis_type", None)
-                and device.chassis_type.lower() == "stack"
-            ):
-                log.info(f"Sleep for {reconnect_timeout} seconds in order to sync")
+            if (getattr(device, "chassis_type", None)
+                    and device.chassis_type.lower() == "stack"):
+                log.info(
+                    f"Sleep for {reconnect_timeout} seconds in order to sync")
                 time.sleep(reconnect_timeout)
 
             if not _disconnect_reconnect(device):
@@ -2266,9 +2665,8 @@ class RommonBoot(BaseStage):
                 try:
                     device.api.configure_autoboot()
                 except Exception as e:
-                    step.failed(
-                        "Failed to configure autoboot on the device", from_exception=e
-                    )
+                    step.failed("Failed to configure autoboot on the device",
+                                from_exception=e)
             else:
                 step.skipped("No autoboot API available")
 
@@ -2364,6 +2762,12 @@ class CopyToDevice(BaseStage):
 
         prompt_recovery(bool, optional): Enable the prompt recovery when the  execution
             command timeout. Defaults to False.
+            
+        verify_md5 (dict, optional):
+            enable: (bool): Enable md5sum verification of the copied image. Defaults to False.
+            verify_host:(str,optinal) Hostname of the server to used for checking the md5sum of the image.
+                                      if not provided it will use the execution host
+            verify_timeout:(int, optional) Timeout in seconds to use when verifying the md5sum. Defaults to 60 secconds.
 
     Example
     -------
@@ -2382,6 +2786,7 @@ class CopyToDevice(BaseStage):
     # Argument Defaults
     # =================
     VERIFY_NUM_IMAGES = True
+    VERIFY_MD5 = {"enable": False}
     VERIFY_RUNNING_IMAGE = True
     EXPECTED_NUM_IMAGES = 1
     # must be '' instead of None to prevent NXOS from
@@ -2404,142 +2809,184 @@ class CopyToDevice(BaseStage):
     UNIQUE_NUMBER = None
     RENAME_IMAGES = None
     PROMPT_RECOVERY = False
-    PROTOCOL = "http"
+    PROTOCOL = "https"
     CONNECTION_ALIAS = "default"
+    VERIFY_MD5_TIMEOUT = 60
 
     # ============
     # Stage Schema
     # ============
     schema = {
         "origin": {
-            Optional("files", description="Image files location on the server."): list,
-            Optional("hostname", description="Hostname or address of the server."): str,
+            Optional("files",
+                     description="Image files location on the server."):
+            list,
+            Optional("hostname",
+                     description="Hostname or address of the server."):
+            str,
         },
         "destination": {
             Required(
                 "directory",
                 description="Directory on the device to copy the images to.",
-            ): str,
+            ):
+            str,
             Optional(
                 "standby_directory",
                 description="Standby directory on the device to copy the images to",
-            ): str,
+            ):
+            str,
             Optional(
                 "stack_directory",
                 description="Stack directories on the device to copy the images to",
-            ): list,
+            ):
+            list,
         },
         Optional(
             "protocol",
             description="Protocol used for copy operation.",
             default=PROTOCOL,
-        ): str,
-        Optional(
-            "connection_alias", description="Connection alias to use", default="default"
-        ): str,
+        ):
+        str,
+        Optional("connection_alias",
+                 description="Connection alias to use",
+                 default="default"):
+        str,
         Optional(
             "verify_num_images",
             description="Verify number of images provided by user for clean is correct.",
             default=VERIFY_NUM_IMAGES,
-        ): bool,
+        ):
+        bool,
         Optional(
             "verify_running_image",
             description="Compare the image filename with the running image version on device. If a match is found, the copy stage will be skipped",
             default=VERIFY_RUNNING_IMAGE,
-        ): bool,
+        ):
+        bool,
         Optional(
             "expected_num_images",
             description="Number of images expected to be provided by user for clean.",
             default=EXPECTED_NUM_IMAGES,
-        ): int,
+        ):
+        int,
         Optional(
             "vrf",
             description="Vrf used to copy. Defaults to an empty string.",
             default=VRF,
-        ): str,
-        Optional(
-            "timeout", description="Copy operation timeout in seconds.", default=TIMEOUT
-        ): int,
+        ):
+        str,
+        Optional("timeout",
+                 description="Copy operation timeout in seconds.",
+                 default=TIMEOUT):
+        int,
         Optional(
             "compact",
             description="Compact copy mode if supported by the device.",
             default=COMPACT,
-        ): bool,
+        ):
+        bool,
         Optional(
             "use_kstack",
             description="Use faster version of copy with limited options.",
             default=USE_KSTACK,
-        ): bool,
+        ):
+        bool,
         Optional(
             "protected_files",
             description="File patterns that should not be deleted.",
             default=PROTECTED_FILES,
-        ): list,
+        ):
+        list,
         Optional(
             "overwrite",
             description="Overwrite the file if a file with the same name already exists.",
             default=OVERWRITE,
-        ): bool,
+        ):
+        bool,
         Optional(
             "skip_deletion",
             description="Do not delete any files even if there isn't any space on device.",
             default=SKIP_DELETION,
-        ): bool,
+        ):
+        bool,
         Optional(
             "copy_attempts",
             description="Number of times to attempt copying image files.",
             default=COPY_ATTEMPTS,
-        ): int,
+        ):
+        int,
         Optional(
             "copy_attempts_sleep",
             description="Number of seconds to sleep between copy_attempts.",
             default=COPY_ATTEMPTS_SLEEP,
-        ): int,
+        ):
+        int,
         Optional(
             "check_file_stability",
             description="Verifies that the file size is not changing. This ensures the image is not actively being copied.",
             default=CHECK_FILE_STABILITY,
-        ): bool,
+        ):
+        bool,
         Optional(
             "stability_check_tries",
             description="Max number of checks that can be done when checking file stability.",
             default=STABILITY_CHECK_TRIES,
-        ): int,
+        ):
+        int,
         Optional(
             "stability_check_delay",
             description="Delay between tries when checking file stability in seconds.",
             default=STABILITY_CHECK_DELAY,
-        ): int,
+        ):
+        int,
         Optional(
             "min_free_space_percent",
             description="Percentage of total disk space that must be free. If specified the percentage is not free then the stage will attempt to delete unprotected files to reach the minimum percentage.",
             default=MIN_FREE_SPACE_PERCENT,
-        ): int,
+        ):
+        int,
         Optional(
             "interface",
             description="The interface to use for file transfers, may be needed for copying files on some IOSXE platforms, such as ASR1K when using a VRF.",
             default=INTERFACE,
-        ): str,
+        ):
+        str,
         Optional(
             "unique_file_name",
             description="Appends a random six-digit number to the end of the image name.",
             default=UNIQUE_FILE_NAME,
-        ): bool,
+        ):
+        bool,
         Optional(
             "unique_number",
             description="Appends the provided number to the end of the image name. Requires unique_file_name is True to be applied.",
             default=UNIQUE_NUMBER,
-        ): int,
+        ):
+        int,
         Optional(
             "rename_images",
             description="Rename the image to the provided name. If multiple files exist then an incrementing number is also appended.",
             default=RENAME_IMAGES,
-        ): str,
+        ):
+        str,
         Optional(
             "prompt_recovery",
             description="Enable the prompt recovery when the  execution command timeout.",
             default=PROMPT_RECOVERY,
-        ): bool,
+        ):
+        bool,
+        Optional("verify_md5"): {
+            Required("enable",
+                     description="Enable md5sum verification of the copied image."):
+            bool,
+            Optional("verify_host",
+                     description="Linux server that is used to generate the MD5 hash."):
+            str,
+            Optional("verify_timeout",
+                     description="Maximum time in seconds allowed for to generate hash."):
+            int,
+        },
     }
 
     # ==============================
@@ -2576,17 +3023,18 @@ class CopyToDevice(BaseStage):
         rename_images=RENAME_IMAGES,
         prompt_recovery=PROMPT_RECOVERY,
         verify_running_image=VERIFY_RUNNING_IMAGE,
+        verify_md5=VERIFY_MD5,
         **kwargs,
     ):
         log.info(
             "Section steps:\n1- Verify correct number of images provided"
-            "\n2- Get filesize of image files"
-            "\n3- Check if image files already exist on device"
-            "\n4- (Optional) Verify stability of image files"
-            "\n5- Verify free space on device else delete unprotected files"
-            "\n6- Copy image files to device"
-            "\n7- Verify copied image files are present on device"
-        )
+            "\n2- (Optional) verify the MD5 hash of the image files"
+            "\n3- Get filesize of image files"
+            "\n4- Check if image files already exist on device"
+            "\n5- (Optional) Verify stability of image files"
+            "\n6- Verify free space on device else delete unprotected files"
+            "\n7- Copy image files to device"
+            "\n8- Verify copied image files are present on device")
 
         if connection_alias:
             log.info(f"Using connection alias {connection_alias}")
@@ -2602,7 +3050,7 @@ class CopyToDevice(BaseStage):
             # Get args
             server = origin.get("hostname")
 
-            image_files = origin["files"]
+            image_files = origin.get("files", [])
 
             # check for smu images in image files, defaults to False
             smu_in_image_files = False
@@ -2612,13 +3060,13 @@ class CopyToDevice(BaseStage):
                 if not file_utils.get_server_block(server):
                     self.failed(
                         "Server '{}' was provided in the clean yaml file but "
-                        "doesn't exist in the testbed file.\n".format(server)
-                    )
+                        "doesn't exist in the testbed file.\n".format(server))
 
-                string_to_remove = file_utils.get_server_block(server).get("path", "")
-                image_files = remove_string_from_image(
-                    images=origin["files"], string=string_to_remove
-                )
+                string_to_remove = file_utils.get_server_block(server).get(
+                    "path", "")
+                image_files = remove_string_from_image(images=origin.get(
+                    "files", []),
+                                                       string=string_to_remove)
 
             # Set active node destination directory
             destination_act = destination["directory"]
@@ -2647,17 +3095,158 @@ class CopyToDevice(BaseStage):
             # Check image files provided
             if verify_num_images:
                 # Verify correct number of images provided
-                with steps.start("Verify correct number of images provided") as step:
+                with steps.start(
+                        "Verify correct number of images provided") as step:
                     if not verify_num_images_provided(
-                        image_list=image_files, expected_images=expected_num_images
-                    ):
+                            image_list=image_files,
+                            expected_images=expected_num_images):
                         step.failed(
                             "Incorrect number of images provided. Please "
                             "provide {} expected image(s) under destination"
-                            ".path in clean yaml file.\n".format(expected_num_images)
-                        )
+                            ".path in clean yaml file.\n".format(
+                                expected_num_images))
                     else:
                         step.passed("Correct number of images provided")
+
+            if isinstance(verify_md5, dict) and verify_md5.get(
+                    "enable", False):
+
+                with steps.start("Check the MD5 hash ") as main_step:
+
+                    try:
+                        out = device.parse("show version")
+                    except Exception as e:
+                        main_step.failed(
+                            f"Failed to get the install mode beacause of {e}")
+
+                    # if the device is in bundle mode and user passed install_image stage this step will not be executed.
+                    modes = Dq(out).get_values("mode") or Dq(out).get_values(
+                        "installation_mode")
+
+                    if modes and "BUNDLE" in modes:
+                        log.info(
+                            "The device is in bundle mode continue with MD5 check."
+                        )
+                    else:
+                        main_step.passx(
+                            "The device is in install mode can not verify the MD5 hash."
+                        )
+                    # Set default if not provided
+                    verify_timeout = verify_md5.setdefault(
+                        'verify_timeout', self.VERIFY_MD5_TIMEOUT)
+                    hostname = verify_md5.get('verify_host')
+                    # if a host is defined use it for checking the hash otherwise use localhost
+                    if hostname:
+                        try:
+                            md5_server = device.api.convert_server_to_linux_device(
+                                hostname)
+                        except AttributeError:
+                            main_step.failed(
+                                "The hostname '{}' provided does not exist in the "
+                                "testbed servers block".format(hostname))
+                    else:
+                        md5_server = 'local'
+
+                    server_name = md5_server if md5_server == 'local' else md5_server.name
+                    with main_step.start(
+                            "Generate the MD5 hash of the image(s) on {}"
+                            "".format(server_name)) as step_1:
+                        if hostname:
+                            try:
+                                md5_server.connect()
+                            except Exception as e:
+                                step_1.failed(
+                                    "Failed to connect to {}.\nError: {}".
+                                    format(hostname, e))
+
+                        server_hashes = {}
+
+                        # Generate the hash for each image
+                        for image in image_files:
+                            with step_1.start(
+                                    "Generating the MD5 hash for '{}'"
+                                    "".format(image)) as substep:
+                                try:
+                                    if hostname:
+                                        hash_ = md5_server.api.get_md5_hash_of_file(
+                                            image, timeout=verify_timeout)
+                                    else:
+                                        with open(image, "rb") as f:
+                                            hash_ = hashlib.md5(
+                                                f.read()).hexdigest()
+                                except Exception as e:
+                                    substep.failed(
+                                        "Failed to get MD5 hash for {}.\nError: {}"
+                                        .format(image, e))
+
+                                if hash_:
+                                    server_hashes[image] = hash_
+                                    substep.passed(
+                                        "The MD5 has for '{}' is '{}'".format(
+                                            image, hash_))
+                                else:
+                                    substep.failed(
+                                        "Failed to get MD5 hash for {}".format(
+                                            image))
+
+                    with main_step.start("Get the running image(s) on {}"
+                                         "".format(device.name)) as step_2:
+
+                        running_images = device.api.get_running_image()
+                        if not running_images:
+                            step_2.failed("Failed to get running image(s)")
+
+                        if not isinstance(running_images, list):
+                            running_images = [running_images]
+
+                        step_2.passed("The running image(s) are: {}".format(
+                            running_images))
+
+                    with main_step.start(
+                            "Generate the MD5 hash of the running image(s) "
+                            "on {}".format(device.name)) as step_3:
+
+                        running_image_hashes = {}
+
+                        for image in running_images:
+                            with step_3.start(
+                                    "Generating the MD5 hash for '{}'"
+                                    "".format(image)) as substep:
+
+                                hash_ = device.api.get_md5_hash_of_file(
+                                    image, timeout=verify_timeout)
+
+                                if hash_:
+                                    running_image_hashes[image] = hash_
+                                    substep.passed(
+                                        "The MD5 hash for '{}' is '{}'".format(
+                                            image, hash_))
+                                else:
+                                    substep.failed(
+                                        "Failed to get MD5 hash for {}".format(
+                                            image))
+
+                    with main_step.start(
+                            "Compare the hashes from the origin to the running "
+                            "images") as step_4:
+
+                        # Values must be compared since the path or name
+                        # of the image can be different
+                        if set(server_hashes.values()) == set(
+                                running_image_hashes.values()):
+                            self.skipped(
+                                "The hashes from the running image(s) match the "
+                                "hashes from the origin server.\n"
+                                "Server hash(es): {}\n"
+                                "Running image hash(es): {} no need to copy image to device"
+                                .format(server_hashes, running_image_hashes))
+                        else:
+                            step_4.passx(
+                                "The hashes from the running image(s) do not match "
+                                "the hashes from the origin server. Continue with copying the image\n"
+                                "Server hash(es): {}\n"
+                                "Running image hash(es): {}".format(
+                                    server_hashes, running_image_hashes))
 
             # Loop over all image files provided by user
             for index, file in enumerate(image_files):
@@ -2673,48 +3262,55 @@ class CopyToDevice(BaseStage):
                 # Check the verify running image only for base image
                 if verify_running_image and "smu" not in file:
                     # Verify the image running in the device
-                    with steps.start("Verify the image running in the device") as step:
+                    with steps.start(
+                            "Verify the image running in the device") as step:
                         try:
                             out = device.parse("show version")
                         except Exception as e:
                             step.failed("Failed to verify the running image")
 
                         # To get the system image
-                        dest_file_path = out.get("version", {}).get("system_image", "")
+                        dest_file_path = out.get("version",
+                                                 {}).get("system_image", "")
 
                         # if the device is in bundle mode and user passed install_image stage this step will not be executed.
-                        modes = Dq(out).get_values("mode") or Dq(out).get_values("installation_mode")
+                        modes = Dq(out).get_values("mode") or Dq(
+                            out).get_values("installation_mode")
 
-                        if modes and "BUNDLE" in modes and "install_image" in device.clean.get("order", []):
+                        if modes and "BUNDLE" in modes and "install_image" in device.clean.get(
+                                "order", []):
                             step.skipped(
                                 f"The device is in bundle mode and install_image stage is passed in clean file. Skipping the verify running image check."
                             )
                         elif "packages.conf" in dest_file_path and any(
-                            "change_boot_variable" in order_name
-                            for order_name in device.clean.get("order", [])
-                        ):
+                                "change_boot_variable" in order_name
+                                for order_name in device.clean.get(
+                                    "order", [])):
                             step.passed(
                                 f"The device is in install mode and change_boot_variable stage is passed in clean file. Continuing with the copy process."
                             )
                         else:
                             # Match the build_label if present, otherwise the xe_version
                             # If neither is found, fail to match the image
-                            xe_version = out.get("version", {}).get("xe_version", "")
-                            build_label = out.get("version", {}).get("build_label", "")
-                            image_version = build_label or xe_version
+                            xe_version = out.get("version",
+                                                 {}).get("xe_version", "")
+                            build_label = out.get("version",
+                                                  {}).get("build_label", "")
+                            image_version = xe_version if len(
+                                xe_version) > 3 else build_label
                             image_match = re.search(image_version, file)
                             if image_match and image_match.group():
                                 # update image mapping 'as-if' we had copied the file
                                 for dest in destinations:
                                     dest_file_path = os.path.join(
-                                        dest, os.path.basename(file)
-                                    )
+                                        dest, os.path.basename(file))
                                     image_mapping = self.history[
-                                        "CopyToDevice"
-                                    ].parameters.setdefault("image_mapping", {})
-                                    image_mapping.update(
-                                        {origin["files"][index]: dest_file_path}
-                                    )
+                                        "CopyToDevice"].parameters.setdefault(
+                                            "image_mapping", {})
+                                    image_mapping.update({
+                                        origin["files"][index]:
+                                        dest_file_path
+                                    })
                                 if smu_in_image_files:
                                     # Additional check to ensure not to skip
                                     # copy_to_device when smu image is provide
@@ -2722,7 +3318,7 @@ class CopyToDevice(BaseStage):
                                     step.passx(
                                         f"The image file provided is same as the current running image {image_version} on the device.\n"
                                         f"Setting the destination image to {dest_file_path}. Proceeding copy of SMU files"
-                                        )
+                                    )
                                 else:
                                     # The copy_to_device stage is skipped
                                     # when a base image is provided
@@ -2731,13 +3327,18 @@ class CopyToDevice(BaseStage):
                                         f"Setting the destination image to {dest_file_path}. Skipping the copy process."
                                     )
                 # Check if the file should be skipped from processing
-                with steps.start(f"Copying image file {os.path.basename(file)}") as super_step:
+                with steps.start(f"Copying image file {os.path.basename(file)}"
+                                 ) as super_step:
                     if skip_base_image_copy:
-                        with super_step.start(f"Get filesize of '{file}'") as step:
-                            step.skipped("The image file provided is same as the current running image")
+                        with super_step.start(
+                                f"Get filesize of '{file}'") as step:
+                            step.skipped(
+                                "The image file provided is same as the current running image"
+                            )
                     else:
                         # try to get file size from file directly
-                        with super_step.start(f"Get filesize of '{file}'") as step:
+                        with super_step.start(
+                                f"Get filesize of '{file}'") as step:
                             try:
                                 file_size = os.stat(file).st_size
                             except Exception:
@@ -2746,10 +3347,8 @@ class CopyToDevice(BaseStage):
                         if not file_size and server:
                             # Get filesize of image files on remote server
                             with super_step.start(
-                                "Get filesize of '{}' on remote server '{}'".format(
-                                    file, server
-                                )
-                            ) as step:
+                                    "Get filesize of '{}' on remote server '{}'"
+                                    .format(file, server)) as step:
                                 try:
                                     file_size = device.api.get_file_size_from_server(
                                         server=file_utils.get_hostname(server),
@@ -2760,10 +3359,8 @@ class CopyToDevice(BaseStage):
                                     )
                                 except FileNotFoundError:
                                     step.failed(
-                                        "Can not find file {} on server {}. Terminating clean".format(
-                                            file, server
-                                        )
-                                    )
+                                        "Can not find file {} on server {}. Terminating clean"
+                                        .format(file, server))
                                 except Exception as e:
                                     log.warning(str(e))
                                     # Something went wrong, set file_size to -1
@@ -2771,42 +3368,44 @@ class CopyToDevice(BaseStage):
                                     unknown_size = True
                                     err_msg = (
                                         "\nUnable to get filesize for file '{}' on "
-                                        "remote server {}".format(file, server)
-                                    )
+                                        "remote server {}".format(
+                                            file, server))
                                     if overwrite:
                                         err_msg += " - will copy file to device"
                                     step.passx(err_msg)
                                 else:
                                     step.passed(
                                         "Verified filesize of file '{}' to be "
-                                        "{} bytes".format(file, file_size)
-                                    )
+                                        "{} bytes".format(file, file_size))
                         else:
                             log.info(f"Local file has size {file_size}")
 
                     for dest in destinations:
 
                         # Check if file with same name and size exists on device
-                        dest_file_path = os.path.join(dest, os.path.basename(file))
-                        image_mapping = self.history["CopyToDevice"].parameters.setdefault(
-                            "image_mapping", {}
-                        )
-                        image_mapping.update({origin["files"][index]: dest_file_path})
+                        dest_file_path = os.path.join(dest,
+                                                      os.path.basename(file))
+                        image_mapping = self.history[
+                            "CopyToDevice"].parameters.setdefault(
+                                "image_mapping", {})
+                        image_mapping.update(
+                            {origin["files"][index]: dest_file_path})
                         if skip_base_image_copy:
                             with super_step.start(
-                                "Check if file '{}' exists on device {} {}".format(
-                                    dest_file_path, device.name, dest
+                                    "Check if file '{}' exists on device {} {}"
+                                    .format(dest_file_path, device.name,
+                                            dest)) as step:
+                                step.skipped(
+                                    "The image file provided is same as the current running image"
                                 )
-                            ) as step:
-                                step.skipped("The image file provided is same as the current running image")
                         else:
                             with super_step.start(
-                                "Check if file '{}' exists on device {} {}".format(
-                                    dest_file_path, device.name, dest
-                                )
-                            ) as step:
+                                    "Check if file '{}' exists on device {} {}"
+                                    .format(dest_file_path, device.name,
+                                            dest)) as step:
                                 # Execute 'dir' before copying image files
-                                dir_before = device.execute("dir {}".format(dest))
+                                dir_before = device.execute(
+                                    "dir {}".format(dest))
 
                                 # Check if file exists
                                 try:
@@ -2820,18 +3419,13 @@ class CopyToDevice(BaseStage):
                                     log.warning(
                                         "Unable to check if image '{}' exists on device {} {}."
                                         "Error: {}".format(
-                                            dest_file_path, device.name, dest, str(e)
-                                        )
-                                    )
+                                            dest_file_path, device.name, dest,
+                                            str(e)))
 
-                                if (
-                                    (not exist)
-                                    or (exist and overwrite)
-                                    or (
-                                        exist
-                                        and (unique_file_name or unique_number or rename_images)
-                                    )
-                                ):
+                                if ((not exist) or (exist and overwrite)
+                                        or (exist and
+                                            (unique_file_name or unique_number
+                                             or rename_images))):
                                     # Update list of files to copy
                                     file_copy_info = {
                                         file: {
@@ -2843,82 +3437,78 @@ class CopyToDevice(BaseStage):
                                     files_to_copy.update(file_copy_info)
                                     # Print message to user
                                     step.passed(
-                                        "Proceeding with copying image {} to device {}".format(
-                                            dest_file_path, device.name
-                                        )
-                                    )
+                                        "Proceeding with copying image {} to device {}"
+                                        .format(dest_file_path, device.name))
                                 else:
                                     step.passed(
                                         "Image '{}' already exists on device {} {}, "
-                                        "skipping copy".format(file, device.name, dest)
-                                    )
+                                        "skipping copy".format(
+                                            file, device.name, dest))
 
                             # Check if any file copy is in progress
                             if check_file_stability:
                                 for file in files_to_copy:
                                     with super_step.start(
-                                        "Verify stability of file '{}'".format(file)
-                                    ) as step:
+                                            "Verify stability of file '{}'".
+                                            format(file)) as step:
                                         # Check file stability
                                         try:
                                             stable = (
-                                                device.api.verify_file_size_stable_on_server(
+                                                device.api.
+                                                verify_file_size_stable_on_server(
                                                     file=file,
-                                                    server=file_utils.get_hostname(server),
+                                                    server=file_utils.
+                                                    get_hostname(server),
                                                     protocol=protocol,
                                                     fu_session=file_utils,
                                                     delay=stability_check_delay,
-                                                    max_tries=stability_check_tries,
-                                                )
-                                            )
+                                                    max_tries=
+                                                    stability_check_tries,
+                                                ))
 
                                             if not stable:
                                                 step.failed(
                                                     "The size of file '{}' on server is not "
-                                                    "stable\n".format(file),
-                                                )
+                                                    "stable\n".format(file), )
                                             else:
                                                 step.passed(
-                                                    "Size of file '{}' is stable".format(file)
-                                                )
+                                                    "Size of file '{}' is stable"
+                                                    .format(file))
                                         except NotImplementedError:
                                             # cannot check using tftp
                                             step.passx(
-                                                "Unable to check file stability over {protocol}".format(
-                                                    protocol=protocol
-                                                )
-                                            )
+                                                "Unable to check file stability over {protocol}"
+                                                .format(protocol=protocol))
                                         except Exception as e:
                                             log.error(str(e))
                                             step.failed(
                                                 "Error while verifying file stability on "
-                                                "server\n"
-                                            )
+                                                "server\n")
 
                         if skip_base_image_copy:
                             with super_step.start(
                                     "Verify sufficient free space on device '{}' '{}' or delete"
-                                    " unprotected files".format(device.name, dest)
-                                ) as step:
-                                step.skipped("The image file provided is same as the current running image")
+                                    " unprotected files".format(
+                                        device.name, dest)) as step:
+                                step.skipped(
+                                    "The image file provided is same as the current running image"
+                                )
                         else:
                             # Verify available space on the device is sufficient for image copy, delete
                             # unprotected files if needed, copy file to the device
                             # unless overwrite: False
                             if files_to_copy:
                                 with super_step.start(
-                                    "Verify sufficient free space on device '{}' '{}' or delete"
-                                    " unprotected files".format(device.name, dest)
-                                ) as step:
+                                        "Verify sufficient free space on device '{}' '{}' or delete"
+                                        " unprotected files".format(
+                                            device.name, dest)) as step:
 
                                     if unknown_size:
                                         total_size = -1
                                         log.warning(
                                             "Amount of space required cannot be confirmed, "
-                                            "copying the files on the device '{}' '{}' may fail".format(
-                                                device.name, dest
-                                            )
-                                        )
+                                            "copying the files on the device '{}' '{}' may fail"
+                                            .format(device.name, dest))
 
                                     if not protected_files:
                                         protected_files = []
@@ -2927,20 +3517,25 @@ class CopyToDevice(BaseStage):
                                     if not skip_deletion:
                                         # TODO: add golden images, config to protected files once we have golden section
                                         golden_config = find_clean_variable(
-                                            self, "golden_config"
-                                        )
-                                        golden_image = find_clean_variable(self, "golden_image")
+                                            self, "golden_config")
+                                        golden_image = find_clean_variable(
+                                            self, "golden_image")
 
                                         if golden_config:
-                                            protected_files.extend(golden_config)
+                                            protected_files.extend(
+                                                golden_config)
                                         if golden_image:
-                                            protected_files.extend(golden_image)
+                                            protected_files.extend(
+                                                golden_image)
 
                                         # Only calculate size of file being copied
                                         total_size = sum(
-                                            0 if file_data["exist"] else (file_data["size"] if file_data["size"] is not None else 0)
-                                            for file_data in files_to_copy.values()
-                                        )
+                                            0 if file_data["exist"] else (
+                                                file_data["size"]
+                                                if file_data["size"]
+                                                is not None else 0)
+                                            for file_data in
+                                            files_to_copy.values())
 
                                         try:
                                             free_space = device.api.free_up_disk_space(
@@ -2948,121 +3543,121 @@ class CopyToDevice(BaseStage):
                                                 required_size=total_size,
                                                 skip_deletion=skip_deletion,
                                                 protected_files=protected_files,
-                                                min_free_space_percent=min_free_space_percent,
+                                                min_free_space_percent=
+                                                min_free_space_percent,
                                                 dir_output=dir_before,
                                                 allow_deletion_failure=True,
                                             )
                                             if not free_space:
                                                 step.failed(
                                                     "Unable to create enough space for "
-                                                    "image on device {} {}".format(
-                                                        device.name, dest
-                                                    )
-                                                )
+                                                    "image on device {} {}".
+                                                    format(device.name, dest))
                                             else:
                                                 step.passed(
                                                     "Device {} {} has sufficient space to "
-                                                    "copy images".format(device.name, dest)
-                                                )
+                                                    "copy images".format(
+                                                        device.name, dest))
                                         except Exception as e:
                                             log.error(str(e))
                                             step.failed(
                                                 "Error while creating free space for "
                                                 "image on device {} {}".format(
-                                                    device.name, dest
-                                                )
-                                            )
+                                                    device.name, dest))
                                     else:
-                                        step.skipped(f"Skip verifying free space on the device '{device.name}'"
-                                                    " because skip_deletion is set to True")
+                                        step.skipped(
+                                            f"Skip verifying free space on the device '{device.name}'"
+                                            " because skip_deletion is set to True"
+                                        )
 
                         if skip_base_image_copy:
                             with super_step.start(
-                                "Copying image file {} to device {} {}".format(
-                                    file, device.name, dest
+                                    "Copying image file {} to device {} {}".
+                                    format(file, device.name, dest)) as step:
+                                step.skipped(
+                                    "The image file provided is same as the current running image"
                                 )
-                            ) as step:
-                                step.skipped("The image file provided is same as the current running image")
                         else:
                             # Copy the file to the devices
                             for file, file_data in files_to_copy.items():
                                 with super_step.start(
-                                    "Copying image file {} to device {} {}".format(
-                                        file, device.name, dest
-                                    )
-                                ) as step:
+                                        "Copying image file {} to device {} {}"
+                                        .format(file, device.name,
+                                                dest)) as step:
 
                                     # Copy file unless overwrite is False
-                                    if (
-                                        not overwrite
-                                        and file_data["exist"]
-                                        and not (
-                                            unique_file_name or unique_number or rename_images
-                                        )
-                                    ):
+                                    if (not overwrite and file_data["exist"]
+                                            and not (unique_file_name
+                                                     or unique_number
+                                                     or rename_images)):
                                         step.skipped(
                                             "File with the same name size exists on "
-                                            "the device {} {}, skipped copying".format(
-                                                device.name, dest
-                                            )
-                                        )
+                                            "the device {} {}, skipped copying"
+                                            .format(device.name, dest))
 
                                     for i in range(1, copy_attempts + 1):
                                         if unique_file_name or unique_number or rename_images:
 
-                                            log.info("renaming files for copying")
+                                            log.info(
+                                                "renaming files for copying")
                                             if rename_images:
-                                                rename_images = rename_images + "_" + str(index)
+                                                rename_images = rename_images + "_" + str(
+                                                    index)
 
                                             try:
                                                 new_name = device.api.modify_filename(
-                                                    file=os.path.basename(file),
+                                                    file=os.path.basename(
+                                                        file),
                                                     directory=destination_act,
                                                     server=server,
                                                     protocol=protocol,
-                                                    unique_file_name=unique_file_name,
+                                                    unique_file_name=
+                                                    unique_file_name,
                                                     unique_number=unique_number,
                                                     new_name=rename_images,
                                                 )
                                             except Exception as e:
                                                 step.failed(
-                                                    "Can not change file name. Terminating clean:\n{e}".format(
-                                                        e=e
-                                                    )
-                                                )
+                                                    "Can not change file name. Terminating clean:\n{e}"
+                                                    .format(e=e))
 
                                             log.info(
                                                 f"Renamed {os.path.basename(file)} to {new_name}"
                                             )
 
-                                            renamed_local_path = os.path.join(dest, new_name)
+                                            renamed_local_path = os.path.join(
+                                                dest, new_name)
 
                                             renamed_file_data = {
-                                                x: y for x, y in file_data.items()
+                                                x: y
+                                                for x, y in file_data.items()
                                             }
-                                            renamed_file_data["dest_path"] = renamed_local_path
+                                            renamed_file_data[
+                                                "dest_path"] = renamed_local_path
 
-                                            self.history["CopyToDevice"].parameters[
-                                                "image_mapping"
-                                            ][file] = renamed_local_path
+                                            self.history[
+                                                "CopyToDevice"].parameters[
+                                                    "image_mapping"][
+                                                        file] = renamed_local_path
 
                                             try:
                                                 res = device.api.copy_to_device(
                                                     protocol=protocol,
                                                     server=(
-                                                        file_utils.get_hostname(server)
-                                                        if server
-                                                        else None
-                                                    ),
+                                                        file_utils.
+                                                        get_hostname(server)
+                                                        if server else None),
                                                     remote_path=file,
-                                                    local_path=renamed_local_path,
+                                                    local_path=
+                                                    renamed_local_path,
                                                     vrf=vrf,
                                                     timeout=timeout,
                                                     compact=compact,
                                                     use_kstack=use_kstack,
                                                     interface=interface,
                                                     overwrite=overwrite,
-                                                    prompt_recovery=prompt_recovery,
+                                                    prompt_recovery=
+                                                    prompt_recovery,
                                                     **kwargs,
                                                 )
                                                 if not res:
@@ -3073,43 +3668,45 @@ class CopyToDevice(BaseStage):
                                                 # Retry attempt if user specified
                                                 if i < copy_attempts:
                                                     log.warning(
-                                                        "Attempt #{}: Unable to copy {} to '{} {}' due to:\n{}".format(
-                                                            i, file, device.name, dest, e
-                                                        )
-                                                    )
+                                                        "Attempt #{}: Unable to copy {} to '{} {}' due to:\n{}"
+                                                        .format(
+                                                            i, file,
+                                                            device.name, dest,
+                                                            e))
                                                     log.info(
-                                                        "Sleeping for {} seconds before retrying".format(
+                                                        "Sleeping for {} seconds before retrying"
+                                                        .format(
                                                             copy_attempts_sleep
-                                                        )
-                                                    )
-                                                    time.sleep(copy_attempts_sleep)
+                                                        ))
+                                                    time.sleep(
+                                                        copy_attempts_sleep)
                                                     continue
                                                 else:
                                                     log.error(str(e))
                                                     step.failed(
                                                         "Failed to copy image '{}' to '{}' on device"
                                                         " '{}'\n".format(
-                                                            file, dest, device.name
-                                                        ),
-                                                    )
+                                                            file, dest,
+                                                            device.name), )
                                         else:
                                             try:
                                                 res = device.api.copy_to_device(
                                                     protocol=protocol,
                                                     server=(
-                                                        file_utils.get_hostname(server)
-                                                        if server
-                                                        else None
-                                                    ),
+                                                        file_utils.
+                                                        get_hostname(server)
+                                                        if server else None),
                                                     remote_path=file,
-                                                    local_path=file_data["dest_path"],
+                                                    local_path=file_data[
+                                                        "dest_path"],
                                                     vrf=vrf,
                                                     timeout=timeout,
                                                     compact=compact,
                                                     use_kstack=use_kstack,
                                                     interface=interface,
                                                     overwrite=overwrite,
-                                                    prompt_recovery=prompt_recovery,
+                                                    prompt_recovery=
+                                                    prompt_recovery,
                                                     **kwargs,
                                                 )
                                                 if not res:
@@ -3120,110 +3717,111 @@ class CopyToDevice(BaseStage):
                                                 # Retry attempt if user specified
                                                 if i < copy_attempts:
                                                     log.warning(
-                                                        "Attempt #{}: Unable to copy {} to '{} {}' due to:\n{}".format(
-                                                            i, file, device.name, dest, e
-                                                        )
-                                                    )
+                                                        "Attempt #{}: Unable to copy {} to '{} {}' due to:\n{}"
+                                                        .format(
+                                                            i, file,
+                                                            device.name, dest,
+                                                            e))
                                                     log.info(
-                                                        "Sleeping for {} seconds before retrying".format(
+                                                        "Sleeping for {} seconds before retrying"
+                                                        .format(
                                                             copy_attempts_sleep
-                                                        )
-                                                    )
-                                                    time.sleep(copy_attempts_sleep)
+                                                        ))
+                                                    time.sleep(
+                                                        copy_attempts_sleep)
                                                     continue
                                                 else:
                                                     log.error(str(e))
                                                     step.failed(
                                                         "Failed to copy image '{}' to '{}' on device"
                                                         " '{}'\n".format(
-                                                            file, dest, device.name
-                                                        ),
-                                                    )
+                                                            file, dest,
+                                                            device.name), )
 
                                         log.info(
                                             "File {} has been copied to {} on device {}"
-                                            " successfully".format(file, dest, device.name)
-                                        )
+                                            " successfully".format(
+                                                file, dest, device.name))
                                         success_copy_ha = True
                                         break
 
                                     # Save the file copied path and size info for future use
                                     history = self.history[
-                                        "CopyToDevice"
-                                    ].parameters.setdefault("files_copied", {})
+                                        "CopyToDevice"].parameters.setdefault(
+                                            "files_copied", {})
 
                                     if unique_file_name or unique_number or rename_images:
-                                        history.update({file: renamed_file_data})
+                                        history.update(
+                                            {file: renamed_file_data})
                                     else:
                                         history.update({file: file_data})
 
                         if skip_base_image_copy:
-                            with super_step.start("Verify images successfully copied") as step:
-                                step.skipped("The image file provided is same as the current running image")
+                            with super_step.start(
+                                    "Verify images successfully copied"
+                            ) as step:
+                                step.skipped(
+                                    "The image file provided is same as the current running image"
+                                )
                         else:
-                            with super_step.start("Verify images successfully copied") as step:
+                            with super_step.start(
+                                    "Verify images successfully copied"
+                            ) as step:
                                 # If nothing copied don't need to verify, skip
-                                if (
-                                    "files_copied"
-                                    not in self.history["CopyToDevice"].parameters
-                                ):
+                                if ("files_copied" not in self.
+                                        history["CopyToDevice"].parameters):
                                     step.skipped(
                                         "Image files were not copied for {} {} in previous steps, "
-                                        "skipping verification steps".format(device.name, dest)
-                                    )
+                                        "skipping verification steps".format(
+                                            device.name, dest))
 
                                 # Execute 'dir' after copying image files
-                                dir_after = device.execute("dir {}".format(dest))
+                                dir_after = device.execute(
+                                    "dir {}".format(dest))
 
                                 for name, image_data in (
-                                    self.history["CopyToDevice"]
-                                    .parameters["files_copied"]
-                                    .items()
-                                ):
+                                        self.history["CopyToDevice"].
+                                        parameters["files_copied"].items()):
                                     with step.start(
-                                        "Verify image '{}' copied to {} on device {}".format(
-                                            image_data["dest_path"], dest, device.name
-                                        )
-                                    ) as substep:
+                                            "Verify image '{}' copied to {} on device {}"
+                                            .format(image_data["dest_path"],
+                                                    dest,
+                                                    device.name)) as substep:
 
                                         # if size is -1 it means it failed to get the size
                                         if not device.api.verify_file_exists(
-                                            file=image_data["dest_path"],
-                                            size=image_data["size"],
-                                            dir_output=dir_after,
+                                                file=image_data["dest_path"],
+                                                size=image_data["size"],
+                                                dir_output=dir_after,
                                         ):
                                             substep.failed(
                                                 "Either the file failed to copy OR the local file size is different "
-                                                "than the origin file size on the device {}.".format(
-                                                    device.name
-                                                )
-                                            )
+                                                "than the origin file size on the device {}."
+                                                .format(device.name))
                                         else:
                                             file_name = os.path.basename(file)
                                             if file_name not in protected_files:
-                                                protected_files.append(file_name)
+                                                protected_files.append(
+                                                    file_name)
                                             log.info(
-                                                "{file_name} added to protected list".format(
-                                                    file_name=file_name
-                                                )
-                                            )
+                                                "{file_name} added to protected list"
+                                                .format(file_name=file_name))
                                             if image_data["size"] != -1:
                                                 substep.passed(
                                                     "File was successfully copied to device {}. "
-                                                    "Local file size is the same as the origin file size.".format(
-                                                        device.name
-                                                    )
-                                                )
+                                                    "Local file size is the same as the origin file size."
+                                                    .format(device.name))
                                             else:
                                                 substep.skipped(
                                                     "File has been copied to device {}.Cannot verify integrity as "
-                                                    "the original file size is unknown.".format(
-                                                        device.name
-                                                    )
-                                                )
+                                                    "the original file size is unknown."
+                                                    .format(device.name))
 
                         if skip_base_image_copy:
-                            super_step.skipped("The image file provided is same as the current running image")
+                            super_step.skipped(
+                                "The image file provided is same as the current running image"
+                            )
+
 
 class ConfigureReplace(BaseStage):
     """This stage does a configure replace on the device."""
@@ -3280,12 +3878,9 @@ class ConfigureReplace(BaseStage):
                     r"\*+\n*!List of Rollback Commands:(?P<rejected_cmds>.*?)end\n\*+"
                 )
                 if re.search(pattern, output, re.DOTALL):
-                    rejected_cmds = (
-                        re.search(pattern, output, re.DOTALL)
-                        .group("rejected_cmds")
-                        .strip()
-                        .split("\n")
-                    )
+                    rejected_cmds = (re.search(
+                        pattern, output,
+                        re.DOTALL).group("rejected_cmds").strip().split("\n"))
                 else:
                     rejected_cmds = []
                 if rejected_cmds:
@@ -3296,7 +3891,8 @@ class ConfigureReplace(BaseStage):
                         log.warning(
                             f"Unexpected warnings: {set(rejected_cmds) - set(known_warnings)}"
                         )
-                        step.failed("Configure replace warnings are not expected")
+                        step.failed(
+                            "Configure replace warnings are not expected")
                 else:
                     step.passed("Configure replace passed without rejection")
 
@@ -3318,10 +3914,12 @@ class Connect(BaseStage):
             Defaults to 0 which means no retry.
         retry_interval (int, optional): Interval for retry mechanism in seconds. Defaults
             to 0 which means no retry.
+        logout (bool, optional): To log out from the device after connection. Defaults to True.
     Example
     -------
     connect:
         timeout: 60
+        logout: False
     """
 
     # =================
@@ -3332,6 +3930,7 @@ class Connect(BaseStage):
     TIMEOUT = 200
     RETRY_TIMEOUT = 0
     RETRY_INTERVAL = 0
+    LOGOUT = True
 
     # ============
     # Stage Schema
@@ -3340,23 +3939,33 @@ class Connect(BaseStage):
         Optional(
             "via",
             description="Which connection to use from the testbed file. Uses the default connection if not specified.",
-        ): str,
-        Optional("alias", description="Which connection alias to use."): str,
+        ):
+        str,
+        Optional("alias", description="Which connection alias to use."):
+        str,
         Optional(
             "timeout",
             description=f"The timeout for the connection to complete in seconds. Defaults to {TIMEOUT}.",
             default=TIMEOUT,
-        ): Or(str, int),
+        ):
+        Or(str, int),
         Optional(
             "retry_timeout",
             description=f"Overall timeout for retry mechanism in seconds. Defaults to {RETRY_TIMEOUT} which means no retry.",
             default=RETRY_TIMEOUT,
-        ): Or(str, int, float),
+        ):
+        Or(str, int, float),
         Optional(
             "retry_interval",
             description=f"Interval for retry mechanism in seconds. Defaults to {RETRY_INTERVAL} which means no retry.",
             default=RETRY_INTERVAL,
-        ): Or(str, int, float),
+        ):
+        Or(str, int, float),
+        Optional(
+            "logout",
+            description="To log out from the device after connection. Defaults to True.",
+            default=LOGOUT,
+        ): bool,
     }
 
     # ==============================
@@ -3373,6 +3982,7 @@ class Connect(BaseStage):
         timeout=TIMEOUT,
         retry_timeout=RETRY_TIMEOUT,
         retry_interval=RETRY_INTERVAL,
+        logout=LOGOUT
     ):
 
         with steps.start("Connecting to the device") as step:
@@ -3381,12 +3991,14 @@ class Connect(BaseStage):
             section = self.parameters.get('section')
 
             # Check if 'section' exists and has a parent with 'device_recovery_processor'
-            if section and getattr(section.parent, 'device_recovery_processor', None):
+            if section and getattr(section.parent, 'device_recovery_processor',
+                                   None):
                 step.result_rollup = False
 
             log.info("Checking connection to device: %s" % device.name)
             # Create a timeout that will loop
-            retry_timeout = Timeout(float(retry_timeout), float(retry_interval))
+            retry_timeout = Timeout(float(retry_timeout),
+                                    float(retry_interval))
             retry_timeout.one_more_time = True
             # Without this we see 'Performing the last attempt' even if retry
             # is not being used.
@@ -3415,8 +4027,10 @@ class Connect(BaseStage):
                     log.info("Console speed mismatch. Trying to recover")
                     device.destroy_all()
                     device.api.configure_management_console()
-                    step.passed("Successfully connected to {}".format(device.name))
-                except (UniconAuthenticationError, CredentialsExhaustedError) as e:
+                    step.passed("Successfully connected to {}".format(
+                        device.name))
+                except (UniconAuthenticationError,
+                        CredentialsExhaustedError) as e:
                     log.info(f"Could not connect to device because of {e}")
                     log.info("Starting device password recovery.")
                     try:
@@ -3424,14 +4038,16 @@ class Connect(BaseStage):
                     except Exception as e:
                         log.error("Password recovery failed", exc_info=True)
                     else:
-                        step.passed("Successfully connected to {}".format(device.name))
+                        step.passed("Successfully connected to {}".format(
+                            device.name))
                         # Don't loop
                 except Exception:
                     log.error("Connection to the device failed", exc_info=True)
                     device.destroy_all()
                     # Loop
                 else:
-                    step.passed("Successfully connected to {}".format(device.name))
+                    step.passed("Successfully connected to {}".format(
+                        device.name))
                     # Don't loop
 
                 retry_timeout.sleep()
@@ -3439,10 +4055,11 @@ class Connect(BaseStage):
             step.failed("Could not connect. Scroll up for tracebacks.")
 
         with steps.start(
-            f"Checking the current state of the device: {device.name}"
+                f"Checking the current state of the device: {device.name}"
         ) as step:
 
-            log.info(f"Checking the current state of the device: {device.name}")
+            log.info(
+                f"Checking the current state of the device: {device.name}")
 
             state = ""
             try:
@@ -3451,13 +4068,10 @@ class Connect(BaseStage):
                     # To allocate handles for HA devices
                     if isinstance(device.subconnections, list):
                         states = list(
-                            set(
-                                [
-                                    con.state_machine.current_state
-                                    for con in device.subconnections
-                                ]
-                            )
-                        )
+                            set([
+                                con.state_machine.current_state
+                                for con in device.subconnections
+                            ]))
                         if "rommon" in states:
                             # To get the subconnections and designate handles
                             state = "rommon"
@@ -3476,63 +4090,47 @@ class Connect(BaseStage):
                     # To check the state for single rp device
                     state = device.state_machine.current_state
             except Exception as e:
-                log.warning(f"There is no connection in device.subconnections: {e}")
+                log.warning(
+                    f"There is no connection in device.subconnections: {e}")
 
         if state == "rommon":
 
-            with steps.start("Setting the rommon variables") as step:
+            with steps.start(
+                    "Setting the rommon variables and Booting the device from rommon"
+            ) as step:
 
-                log.info("Setting the rommon variables for TFTP boot")
-
-                try:
-                    if device.is_ha and hasattr(device, "subconnections"):
-                        device.api.configure_rommon_tftp_ha()
-                    else:
-                        device.api.configure_rommon_tftp()
-                except Exception as e:
-                    step.passx(f"Failed to set rommon variables. {e}")
-                else:
-                    log.info("Successfully set the rommon variables")
-
-            with steps.start("Configuring the manual boot") as step:
-
-                log.info("Configuring the manual boot")
-
-                try:
-
-                    if device.is_ha and hasattr(device, "subconnections"):
-                        states_list = []
-                        # Switch to enable mode if one of the rps are disable mode.
-                        for con in device.subconnections:
-                            if con.state_machine.current_state == "disable":
-                                con.state_machine.go_to("enable", con.spawn)
-                            states_list.append(con.state_machine.current_state)
-
-                        # if one rp in enable mode and another rp in rommon set boot manual on enable rp.
-                        if "enable" in states_list and "rommon" in states_list:
-                            device.subconnections[
-                                states_list.index("enable")
-                            ].configure("boot manual")
-                        else:
-                            log.info(
-                                "Both rps are in rommon mode. Skipping the manual boot configuration"
-                            )
-                except Exception as e:
-                    step.passx(f"Failed to configure manual boot. {e}")
-                else:
-                    log.info("Successfully configured manual boot")
-
-            with steps.start("Booting the device from rommon") as step:
-
-                log.info("Booting the device from rommon")
+                log.info(
+                    "Setting the rommon variables and Booting the device from rommon"
+                )
 
                 try:
                     # Gets the recovery details from clean yaml
                     device.api.device_rommon_boot()
                 except Exception as e:
-                    step.passx(f"Failed to boot device from rommon. {e}")
+                    step.failed(f"Failed to boot device from rommon. {e}")
                 else:
                     log.info("Successfully booted the device from rommon.")
+        else:
+            with steps.start("Log out from the device") as step:
+                # by default logout set as true
+                if logout:
+                    try:
+                        device.logout()
+                        # To handle the login prompt and ssh connection issues after logout
+                        if not device.connected:
+                            device.disconnect()
+                            device.connect()
+                        else:
+                            device.connection_provider.connect()
+                    except Exception as e:
+                        log.error(f"Failed to log out from the device. {e}", exc_info=True)
+                        step.failed(f"Failed to log out from the device. {e}")
+                    else:
+                        step.passed("Successfully logged out from the device")
+                else:
+                    step.skipped(
+                        "skipping this step, as the user set logout as false"
+                    )
 
         # set mit to False to initialize the connection
         device.default.mit = False
@@ -3541,7 +4139,7 @@ class Connect(BaseStage):
 
             try:
                 device.connection_provider.init_connection()
-            except UniconAuthenticationError as e:
+            except (UniconAuthenticationError, CredentialsExhaustedError) as e:
                 log.info(f"Could not connect to device because of {e}")
                 log.info("Starting device password recovery.")
                 try:
@@ -3549,7 +4147,8 @@ class Connect(BaseStage):
                 except Exception:
                     log.error("Password recovery failed", exc_info=True)
                 else:
-                    step.passed("Successfully connected to {}".format(device.name))
+                    step.passed("Successfully connected to {}".format(
+                        device.name))
             except Exception as e:
                 step.failed(f"Failed to initialize the connection. {e}")
             else:
@@ -3570,6 +4169,10 @@ class ResetConfiguration(BaseStage):
     reset_configuration:
         timeout (int, optional): The timeout for device configuration to complete in seconds.
             Defaults to 120.
+        bulk_chunk_lines(int, optional): The number of chunks to be processed at a time
+            Defaults to 20.
+        bulk_chunk_sleep(float, optional): Time gap for the next chuck to processed
+            Defaults to 0.5 seconds
 
     Example:
 
@@ -3584,6 +4187,8 @@ class ResetConfiguration(BaseStage):
     # Argument Defaults
     # =================
     TIMEOUT = 120
+    BULK_CHUNK_LINES = 20
+    BULK_CHUNK_SLEEP = 0.5
 
     # ============
     # Stage Schema
@@ -3592,10 +4197,20 @@ class ResetConfiguration(BaseStage):
         Optional(
             "timeout",
             description="Timeout for device configuration. Default: 120 seconds.",
-        ): int,
+        ):
+        int,
+        Optional(
+            "bulk_chunk_lines",
+            description="Number of chunks to be processed.",
+        ):
+        int,
+        Optional("bulk_chunk_sleep", description="Interval between the chunks"):
+        float,
     }
 
-    exec_order = ["create_config_file", "reset_configuration", "show_running_config"]
+    exec_order = [
+        "create_config_file", "reset_configuration", "show_running_config"
+    ]
 
     def _recurse_config_dict_to_text(self, config_dict, level=0, indent=1):
         output = ""
@@ -3607,18 +4222,27 @@ class ResetConfiguration(BaseStage):
                 else:
                     output += "\n" + " " * level * indent + key
             else:
-                output += (
-                    "\n"
-                    + " " * level * indent
-                    + key
-                    + self._recurse_config_dict_to_text(value, level + 1)
-                )
+                output += ("\n" + " " * level * indent + key +
+                           self._recurse_config_dict_to_text(value, level + 1))
         return output
 
     def _generate_config_text(self, config_dict):
         return self._recurse_config_dict_to_text(config_dict, level=0)
 
-    def _filter_config_dict(self, config_dict, new_config_dict, KEEP):
+    def _filter_config_dict(self,
+                            config_dict,
+                            new_config_dict,
+                            KEEP,
+                            REPLACE={}):
+        ''' Filter items from the configuration dictionary.
+
+        Only keep items that are defined in KEEP and replace items defined in REPLACE
+
+        config_dict (dict): existing config dictionary
+        new_config_dict (dict): new config dictionary
+        KEEP (dict): dict of regex to keep
+        REPLACE (dict): dict of string values to replace
+        '''
         for k in config_dict:
             for key in KEEP:
                 if re.search(key, k) and not KEEP[key]:
@@ -3626,17 +4250,17 @@ class ResetConfiguration(BaseStage):
                     break
                 elif re.search(key, k) and KEEP[key]:
                     # filter in section
-                    self._filter_config_dict(
-                        config_dict[k], new_config_dict[k], KEEP[key]
-                    )
+                    self._filter_config_dict(config_dict[k],
+                                             new_config_dict[k], KEEP[key])
                     break
             else:
                 new_config_dict.pop(k, None)
+                if k in REPLACE:
+                    new_config_dict[REPLACE[k]] = {}
 
     def _generate_default_config(self, device, config_dict):
 
-        DEFAULTS = dedent(
-            """\
+        DEFAULTS = dedent("""\
             !
             ! Last configuration change
             !
@@ -3644,10 +4268,7 @@ class ResetConfiguration(BaseStage):
             no logging console
             service timestamps debug datetime msec
             service timestamps log datetime msec
-            """.format(
-                device=device
-            )
-        )
+            """.format(device=device))
 
         KEEP = {
             "^interface GigabitEthernet0(/0)?$": {
@@ -3666,7 +4287,10 @@ class ResetConfiguration(BaseStage):
             "^license boot level": {},
             "^class-map match-any system": {},
             "^policy-map system": {},
-            "^interface Vlan1$": {"^no ip address": {}, "^shutdown": {}},
+            "^interface Vlan1$": {
+                "^no ip address": {},
+                "^shutdown": {}
+            },
             "^transceiver type all": {},
             "^redundancy": {},
             "^control-plane": {},
@@ -3683,23 +4307,42 @@ class ResetConfiguration(BaseStage):
             "^interface Async": {},
             "^ip forward-protocol nd": {},
             "^ip ssh bulk-mode": {},
-            "^line con": {"^speed": {}, "^stopbits": {}},
-            "^line vty": {"^transport input": {}},
+            "^line con": {
+                "^speed": {},
+                "^stopbits": {}
+            },
+            "^line vty": {
+                "^transport input": {}
+            },
             "^ip http server": {},
             "^ip http secure-server": {},
+            "^platform console serial": {},
+        }
+
+        REPLACE = {
+            'no aaa new-model': 'aaa new-model',
+            'platform console virtual': 'platform console serial'
         }
 
         new_config_dict = copy.deepcopy(config_dict)
 
-        self._filter_config_dict(config_dict, new_config_dict, KEEP)
+        self._filter_config_dict(config_dict, new_config_dict, KEEP, REPLACE)
 
         config_text = self._generate_config_text(new_config_dict)
+
+        # explicitly set enable auth to none
+        config_text += '\naaa authentication enable default none'
 
         config_text = DEFAULTS + config_text + "\nend"
 
         return config_text
 
-    def create_config_file(self, steps, device, timeout=TIMEOUT):
+    def create_config_file(self,
+                           steps,
+                           device,
+                           timeout=TIMEOUT,
+                           bulk_chunk_lines=BULK_CHUNK_LINES,
+                           bulk_chunk_sleep=BULK_CHUNK_SLEEP):
         with steps.start("Getting current config") as step:
             # Use lstrip to avoid stripping trailing whitespace from config lines,
             # this is required for config replace to work with pki certs.
@@ -3712,54 +4355,58 @@ class ResetConfiguration(BaseStage):
 
             # Write the configuration into a file on the device using TCL shell.
             device.tclsh()
-            lines = (
-                [
-                    'puts [open "base_config.txt" w+] {',
-                ]
-                + config_lines
-                + ["}"]
-            )
-            for line in lines:
-                device.sendline(line)
-                # Instead of waiting for each line to be processed, just keep
-                # reading the buffer. This is a lot faster and testing has shown
-                # this to work fine. This could be changed using a bulk approach
-                # like unicon configure() service if needed.
-                device.spawn.read_update_buffer()
+
+            lines = ([
+                'puts [open "base_config.txt" w+] {',
+            ] + config_lines + ["}"])
+
+            # process the lines into chunks
+            chunks = [
+                lines[i:i + bulk_chunk_lines]
+                for i in range(0, len(lines), bulk_chunk_lines)
+            ]
+            # Iterate through the chunks
+            for idx, chunk in enumerate(chunks, 1):
+                # Send and read the buffer for each chunk
+                for line in chunk:
+                    device.sendline(line)
+                    device.spawn.read_update_buffer()
+                if idx != len(chunks):
+                    # Sleep between chunks
+                    time.sleep(bulk_chunk_sleep)
+
             # Wait until all config data has been processed by the device
             device.expect(
                 device.state_machine.get_state(
-                    device.state_machine.current_state
-                ).pattern,
+                    device.state_machine.current_state).pattern,
                 timeout,
             )
 
             device.enable()
 
     def reset_configuration(self, steps, device, timeout=TIMEOUT):
-        dialog = Dialog(
+        dialog = Dialog([
             [
-                [
-                    r".*?Enter Y if you are sure you want to proceed. \? \[no]:\s*$",
-                    "sendline(y)",
-                    None,
-                    True,
-                    False,
-                ],
-                [
-                    r".*?Overwriting with a file sized 50% or less than running config\'s. Proceed\? \[no]:\s*$",
-                    "sendline(yes)",
-                    None,
-                    True,
-                    False,
-                ],
-            ]
-        )
+                r".*?Enter Y if you are sure you want to proceed. \? \[no]:\s*$",
+                "sendline(y)",
+                None,
+                True,
+                False,
+            ],
+            [
+                r".*?Overwriting with a file sized 50% or less than running config\'s. Proceed\? \[no]:\s*$",
+                "sendline(yes)",
+                None,
+                True,
+                False,
+            ],
+        ])
 
         # Configure the hostname explicitly
         device.configure(f"hostname {device.name}")
 
-        with steps.start("Resetting configuration using config replace") as step:
+        with steps.start(
+                "Resetting configuration using config replace") as step:
             output = device.execute(
                 "config replace flash:base_config.txt",
                 reply=dialog,
@@ -3821,18 +4468,19 @@ class SetControllerMode(BaseStage):
         "delete_inactive_versions",
     ]
 
-    def set_controller_mode(
-        self, steps, device, mode=MODE, reload_timeout=RELOAD_TIMEOUT
-    ):
+    def set_controller_mode(self,
+                            steps,
+                            device,
+                            mode=MODE,
+                            reload_timeout=RELOAD_TIMEOUT):
 
         # Check if we're already in the desired mode
         version_data = device.parse("show version")
 
         # For those versions of IOSXE where version is a str
         try:
-            router_operating_mode = version_data.get("version", {}).get(
-                "router_operating_mode"
-            )
+            router_operating_mode = version_data.get(
+                "version", {}).get("router_operating_mode")
         except AttributeError:
             router_operating_mode = None
 
@@ -3859,69 +4507,69 @@ class SetControllerMode(BaseStage):
             # Confirm password:
             #
             # Router# pnpa service discovery stop
-            generic_statments = GenericStatements()
+            generic_statements = GenericStatements()
 
-            controller_mode_dialog = Dialog(
-                [
-                    Statement(
-                        pattern=r"Continue\? \[confirm\]",
-                        action="sendline()",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Do you want to abort\? \(yes/\[no\]\):",
-                        action="sendline(no)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Username:",
-                        action="sendline(admin)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Password:",
-                        action="sendline(admin)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Enter new password:",
-                        action=f"sendline({password})",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Confirm password:",
-                        action=f"sendline({password})",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"Press RETURN to get started.*",
-                        action=f"sendline()",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"(.*?)Would you like to enter the initial configuration dialog\? \[yes/no\]:\s*",
-                        action=f"sendline(no)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    Statement(
-                        pattern=r"(.*?)Would you like to enter the initial configuration dialog\? \[yes/no\]:\s*",
-                        action=f"sendline(no)",
-                        loop_continue=True,
-                        continue_timer=False,
-                    ),
-                    generic_statments.syslog_msg_stmt,
-                    generic_statments.enable_secret_stmt,
-                    generic_statments.enter_your_selection_stmt,
-                ]
-            )
+            controller_mode_dialog = Dialog([
+                Statement(
+                    pattern=r"Continue\? \[confirm\]",
+                    action="sendline()",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Do you want to abort\? \(yes/\[no\]\):",
+                    action="sendline(no)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Username:",
+                    action="sendline(admin)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Password:",
+                    action="sendline(admin)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Enter new password:",
+                    action=f"sendline({password})",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Confirm password:",
+                    action=f"sendline({password})",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=r"Press RETURN to get started.*",
+                    action=f"sendline()",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=
+                    r"(.*?)Would you like to enter the initial configuration dialog\? \[yes/no\]:\s*",
+                    action=f"sendline(no)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                Statement(
+                    pattern=
+                    r"(.*?)Would you like to enter the initial configuration dialog\? \[yes/no\]:\s*",
+                    action=f"sendline(no)",
+                    loop_continue=True,
+                    continue_timer=False,
+                ),
+                generic_statements.syslog_msg_stmt,
+                generic_statements.enable_secret_stmt,
+                generic_statements.enter_your_selection_stmt,
+            ])
 
             try:
                 device.execute(
@@ -3931,10 +4579,8 @@ class SetControllerMode(BaseStage):
                     allow_state_change=True,
                 )
             except SubCommandFailure:
-                self.skipped(
-                    "Unable to configure controller-mode. Is it a "
-                    "feature of this device?"
-                )
+                self.skipped("Unable to configure controller-mode. Is it a "
+                             "feature of this device?")
 
     def confirm_and_set_default(self, steps, device, mode=MODE):
 
@@ -3942,19 +4588,16 @@ class SetControllerMode(BaseStage):
             if device.connected:
                 device.destroy_all()
             if mode == "disable":
-                self.output = device.connect(
-                    learn_tokens=True, overwrite_testbed_tokens=True
-                )
+                self.output = device.connect(learn_tokens=True,
+                                             overwrite_testbed_tokens=True)
             else:
                 self.output = device.connect()
 
                 parsed_output = device.parse("show sdwan software")
                 active_version = parsed_output.q.contains_key_value(
-                    "active", "true"
-                ).get_values("version", 0)
+                    "active", "true").get_values("version", 0)
                 self.non_active_version = parsed_output.q.contains_key_value(
-                    "active", "false"
-                ).get_values("version")
+                    "active", "false").get_values("version")
 
                 if active_version:
                     commands = [
@@ -3968,9 +4611,11 @@ class SetControllerMode(BaseStage):
 
         with steps.start("Verify controller mode") as step:
             if "Controller-Managed" in self.output and mode == "enable":
-                step.passed("Device booted up with controller-mode successfully.")
+                step.passed(
+                    "Device booted up with controller-mode successfully.")
             elif "Autonomous" in self.output and mode == "disable":
-                step.passed("Device booted up with autonomous-mode successfully.")
+                step.passed(
+                    "Device booted up with autonomous-mode successfully.")
             elif "Controller-Managed" in self.output and mode == "disable":
                 step.failed("Device couldn't boot up with autonomous-mode")
             elif "Autonomous" in self.output and mode == "enable":
